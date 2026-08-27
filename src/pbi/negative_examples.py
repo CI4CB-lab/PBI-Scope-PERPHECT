@@ -210,14 +210,14 @@ class NegativeExampleGenerator:
         # Build records — look up full rows only for final pairs
         logging.info(f"  Building {len(negative_list):,} negative records...")
         
-        # Index DataFrames by ID for fast lookup
-        phage_indexed = self.all_phages.set_index("Phage_ID")
-        host_indexed = self.all_hosts.set_index("Host_ID")
+        # Map IDs to row indices for fast .iloc lookups
+        phage_id_to_idx = {pid: i for i, pid in enumerate(self.all_phages["Phage_ID"].values)}
+        host_id_to_idx = {hid: i for i, hid in enumerate(self.all_hosts["Host_ID"].values)}
         
         negatives = []
         for pid, hid in negative_list:
-            phage = phage_indexed.loc[pid]
-            host = host_indexed.loc[hid]
+            phage = self.all_phages.iloc[phage_id_to_idx[pid]]
+            host = self.all_hosts.iloc[host_id_to_idx[hid]]
             negatives.append(self._build_negative_record(phage, host))
         
         df = pd.DataFrame(negatives)
