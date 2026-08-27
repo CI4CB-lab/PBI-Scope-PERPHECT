@@ -350,6 +350,8 @@ def _train_fold(fold_num, adapter, X_train, y_train, X_valid, y_valid,
 # ---------------------------------------------------------------------------
 
 def main():
+    SCRIPT_DIR = Path(__file__).parent
+
     parser = argparse.ArgumentParser(
         description="Train PERPHECT phage-host interaction predictor",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -409,7 +411,8 @@ def main():
     # Load config file if provided
     if args.config:
         import yaml
-        with open(args.config) as f:
+        config_path = Path(args.config) if Path(args.config).is_absolute() else SCRIPT_DIR / args.config
+        with open(config_path) as f:
             config = yaml.safe_load(f)
 
         # Resolve which config section to use: defaults + optional profile overlay
@@ -542,7 +545,7 @@ def main():
 
     # Exclude held-out test pairs if specified
     if args.exclude_ids:
-        exclude_path = Path(args.exclude_ids)
+        exclude_path = Path(args.exclude_ids) if Path(args.exclude_ids).is_absolute() else SCRIPT_DIR / args.exclude_ids
         if exclude_path.exists():
             exclude_df = pd.read_csv(exclude_path)
             exclude_set = set(zip(exclude_df["Phage_ID"], exclude_df["Host_ID"]))
