@@ -183,7 +183,7 @@ class NegativeExampleGenerator:
         host_indices = np.random.choice(len(self.all_hosts), size=batch_size, replace=True)
         
         phages_sampled = self.all_phages.iloc[phage_indices].reset_index(drop=True)
-        hosts_sampled = self.all_hosts.iloc(host_indices).reset_index(drop=True)
+        hosts_sampled = self.all_hosts.iloc[host_indices].reset_index(drop=True)
         
         all_phage_ids = phages_sampled["Phage_ID"].values
         all_host_ids = hosts_sampled["Host_ID"].values
