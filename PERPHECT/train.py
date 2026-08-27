@@ -30,6 +30,7 @@ import logging
 import math
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -57,6 +58,24 @@ def setup_logging(log_file=None, verbose=False):
         handlers.append(logging.FileHandler(log_file))
 
     logging.basicConfig(level=level, format=fmt, datefmt=datefmt, handlers=handlers)
+
+
+class _Timer:
+    """Simple context-manager timer that logs elapsed seconds."""
+
+    def __init__(self, label: str):
+        self.label = label
+        self.start = None
+        self.elapsed = None
+
+    def __enter__(self):
+        self.start = time.time()
+        logging.info(f"  [{self.label}] starting...")
+        return self
+
+    def __exit__(self, *_):
+        self.elapsed = time.time() - self.start
+        logging.info(f"  [{self.label}] done in {self.elapsed:.1f}s")
 
 
 # ---------------------------------------------------------------------------
@@ -503,7 +522,8 @@ def main():
     from pbi_adapter import PBIAdapter
     from sklearn.model_selection import train_test_split, StratifiedKFold
 
-    retriever = quick_connect()
+    with _Timer("quick_connect (DB + FASTA init)"):
+        retriever = quick_connect()
     adapter = PBIAdapter(
         retriever,
         bacterium_threshold=args.bacterium_threshold,
@@ -526,52 +546,55 @@ def main():
     # Phase 1: Query pair IDs only (fast — no sequences fetched)
     logging.info("Querying pair IDs from database...")
     
-    if is_finetuning:
-        # FINE-TUNING MODE: Only use the excluded sources
-        if not exclude_sources:
-            raise ValueError("--exclude-sources is required for fine-tuning mode")
-        
-        # Query ONLY the specified sources for fine-tuning
-        placeholders = ", ".join(["?" for _ in exclude_sources])
-        query = f"""
-        SELECT DISTINCT pha.Phage_ID, pha.Host_ID
-        FROM phage_host_associations pha
-        JOIN fact_phages p ON pha.Phage_ID = p.Phage_ID
-        WHERE p.Source_DB IN ({placeholders})
-        """
-        query += " ORDER BY MD5(pha.Phage_ID || pha.Host_ID)"
-        all_pairs = retriever.conn.execute(query, exclude_sources).fetchdf()
-        logging.info(f"Fine-tuning mode: Found {len(all_pairs)} pairs from sources {exclude_sources}")
-    else:
-        # PRE-TRAINING MODE: Exclude specified sources
-        all_pairs = adapter.get_pair_ids_only(shuffle=True, exclude_sources=exclude_sources)
-        logging.info(f"Pre-training mode: Found {len(all_pairs)} pairs in database (excluded sources: {exclude_sources})")
+    with _Timer("Query pair IDs from DB"):
+        if is_finetuning:
+            # FINE-TUNING MODE: Only use the excluded sources
+            if not exclude_sources:
+                raise ValueError("--exclude-sources is required for fine-tuning mode")
+            
+            # Query ONLY the specified sources for fine-tuning
+            placeholders = ", ".join(["?" for _ in exclude_sources])
+            query = f"""
+            SELECT DISTINCT pha.Phage_ID, pha.Host_ID
+            FROM phage_host_associations pha
+            JOIN fact_phages p ON pha.Phage_ID = p.Phage_ID
+            WHERE p.Source_DB IN ({placeholders})
+            """
+            query += " ORDER BY MD5(pha.Phage_ID || pha.Host_ID)"
+            all_pairs = retriever.conn.execute(query, exclude_sources).fetchdf()
+            logging.info(f"Fine-tuning mode: Found {len(all_pairs)} pairs from sources {exclude_sources}")
+        else:
+            # PRE-TRAINING MODE: Exclude specified sources
+            all_pairs = adapter.get_pair_ids_only(shuffle=True, exclude_sources=exclude_sources)
+            logging.info(f"Pre-training mode: Found {len(all_pairs)} pairs in database (excluded sources: {exclude_sources})")
 
     # Exclude held-out test pairs if specified
     if args.exclude_ids:
-        exclude_path = Path(args.exclude_ids) if Path(args.exclude_ids).is_absolute() else SCRIPT_DIR / args.exclude_ids
-        if exclude_path.exists():
-            exclude_df = pd.read_csv(exclude_path)
-            exclude_set = set(zip(exclude_df["Phage_ID"], exclude_df["Host_ID"]))
-            before = len(all_pairs)
-            all_pairs = all_pairs[
-                ~all_pairs.apply(
-                    lambda r: (r["Phage_ID"], r["Host_ID"]) in exclude_set, axis=1
+        with _Timer("Exclude held-out test pairs"):
+            exclude_path = Path(args.exclude_ids) if Path(args.exclude_ids).is_absolute() else SCRIPT_DIR / args.exclude_ids
+            if exclude_path.exists():
+                exclude_df = pd.read_csv(exclude_path)
+                exclude_set = set(zip(exclude_df["Phage_ID"], exclude_df["Host_ID"]))
+                before = len(all_pairs)
+                all_pairs = all_pairs[
+                    ~all_pairs.apply(
+                        lambda r: (r["Phage_ID"], r["Host_ID"]) in exclude_set, axis=1
+                    )
+                ].reset_index(drop=True)
+                logging.info(
+                    f"Excluded {before - len(all_pairs)} test pairs from {exclude_path} "
+                    f"({len(all_pairs)} remaining)"
                 )
-            ].reset_index(drop=True)
-            logging.info(
-                f"Excluded {before - len(all_pairs)} test pairs from {exclude_path} "
-                f"({len(all_pairs)} remaining)"
-            )
-        else:
-            raise FileNotFoundError(
-                f"--exclude-ids file not found: {exclude_path}. "
-                "Run 01_prepare_test_set.ipynb first to create the excluded pairs CSV."
-            )
+            else:
+                raise FileNotFoundError(
+                    f"--exclude-ids file not found: {exclude_path}. "
+                    "Run 01_prepare_test_set.ipynb first to create the excluded pairs CSV."
+                )
 
     # Classify pairs by interaction type (before applying limit!)
     logging.info("Classifying pairs by interaction type...")
-    positive_pairs, private_negatives = adapter.classify_pairs_by_interaction(all_pairs)
+    with _Timer("Classify pairs by interaction"):
+        positive_pairs, private_negatives = adapter.classify_pairs_by_interaction(all_pairs)
 
     # Apply limit to positive pairs only (private negatives are always included)
     if args.limit and len(positive_pairs) > args.limit:
@@ -605,28 +628,30 @@ def main():
     target_count = min(len(positive_pairs), max_generated)
     effective_ratio = target_count / len(positive_pairs) if len(positive_pairs) > 0 else 0
     logging.info(f"  Target: {target_count} synthetic negatives (ratio={effective_ratio:.3f})")
-    generated_negatives = neg_gen.generate_random_negatives(
-        positive_pairs, ratio=effective_ratio
-    )
+    with _Timer("Generate synthetic negatives"):
+        generated_negatives = neg_gen.generate_random_negatives(
+            positive_pairs, ratio=effective_ratio
+        )
 
     # Deduplicate against private negatives
     # NOTE: Generated negatives are NOT deduped against the --exclude-ids test set.
     # Collision probability is negligible (billions of possible phage-host pairs).
     if len(private_negatives) > 0:
-        private_neg_set = set(
-            zip(private_negatives["Phage_ID"], private_negatives["Host_ID"])
-        )
-        before_dedup = len(generated_negatives)
-        generated_negatives = generated_negatives[
-            ~generated_negatives.apply(
-                lambda r: (r["Phage_ID"], r["Host_ID"]) in private_neg_set, axis=1
+        with _Timer("Deduplicate generated vs private negatives"):
+            private_neg_set = set(
+                zip(private_negatives["Phage_ID"], private_negatives["Host_ID"])
             )
-        ].reset_index(drop=True)
-        if before_dedup - len(generated_negatives) > 0:
-            logging.info(
-                f"  Removed {before_dedup - len(generated_negatives)} duplicates "
-                f"against existing private negatives"
-            )
+            before_dedup = len(generated_negatives)
+            generated_negatives = generated_negatives[
+                ~generated_negatives.apply(
+                    lambda r: (r["Phage_ID"], r["Host_ID"]) in private_neg_set, axis=1
+                )
+            ].reset_index(drop=True)
+            if before_dedup - len(generated_negatives) > 0:
+                logging.info(
+                    f"  Removed {before_dedup - len(generated_negatives)} duplicates "
+                    f"against existing private negatives"
+                )
 
     generated_negatives["negative_source"] = "generated"
     logging.info(f"  Generated: {len(generated_negatives)} synthetic negative pairs")
@@ -647,7 +672,8 @@ def main():
 
     # Prepare training data
     logging.info("Preparing training data (fetching sequences, padding, encoding)...")
-    couples, labels, sources = adapter.prepare_training_data(positive_pairs, negative_pairs)
+    with _Timer("prepare_training_data (fetch + encode all pairs)"):
+        couples, labels, sources = adapter.prepare_training_data(positive_pairs, negative_pairs)
     logging.info(
         f"Total pairs: {len(couples)} "
         f"({int(labels.sum())} positive, {int(len(labels) - labels.sum())} negative"
@@ -670,10 +696,11 @@ def main():
     # Train/validation/test split (stratified by label AND source)
     # -----------------------------------------------------------------------
     logging.info("Splitting data into train/validation/test (stratified)...")
-    stratify_key = np.array([
-        "pos" if l == 1 else f"neg_{s}"
-        for l, s in zip(labels, sources)
-    ])
+    with _Timer("Train/test/val split"):
+        stratify_key = np.array([
+            "pos" if l == 1 else f"neg_{s}"
+            for l, s in zip(labels, sources)
+        ])
 
     # -----------------------------------------------------------------------
     # Branch: Cross-validation or standard split

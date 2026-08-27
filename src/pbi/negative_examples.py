@@ -8,6 +8,7 @@ for machine learning training on phage-host interaction prediction.
 import pandas as pd
 import numpy as np
 import logging
+import time
 from typing import Optional, List
 from pbi.sequence_retrieval import SequenceRetriever
 
@@ -63,6 +64,7 @@ class NegativeExampleGenerator:
     
     def _cache_phages_and_hosts(self):
         """Cache available phages and hosts from database"""
+        t0 = time.time()
         # Get all phages with metadata - include all columns for consistent dataset
         phage_query = """
         SELECT DISTINCT
@@ -96,7 +98,7 @@ class NegativeExampleGenerator:
         """
         self.all_hosts = self.conn.execute(host_query).fetchdf()
         
-        logging.info(f"📊 Cached {len(self.all_phages):,} phages and {len(self.all_hosts):,} hosts")
+        logging.info(f"Cached {len(self.all_phages):,} phages and {len(self.all_hosts):,} hosts in {time.time()-t0:.2f}s")
     
     def _get_positive_set(self, positive_pairs: pd.DataFrame) -> set:
         """
@@ -162,6 +164,7 @@ class NegativeExampleGenerator:
             DataFrame with negative pairs (Phage_ID, Host_ID, Label=0)
         """
         logging.info("Generating random negative examples...")
+        t_total = time.time()
         
         n_negatives = int(len(positive_pairs) * ratio)
         positive_set = self._get_positive_set(positive_pairs)
@@ -183,20 +186,23 @@ class NegativeExampleGenerator:
         batch_size = n_negatives * max_attempts
         logging.info(f"  Sampling {batch_size:,} candidate pairs...")
         
+        t0 = time.time()
         phage_indices = np.random.choice(len(phage_ids), size=batch_size, replace=True)
         host_indices = np.random.choice(len(host_ids), size=batch_size, replace=True)
         
         sampled_phage_ids = phage_ids[phage_indices]
         sampled_host_ids = host_ids[host_indices]
-        logging.info(f"  Sampled {len(sampled_phage_ids):,} candidate pairs")
+        logging.info(f"  Sampled {len(sampled_phage_ids):,} candidate pairs in {time.time()-t0:.2f}s")
         
         # Use set difference for fast filtering
+        t0 = time.time()
         logging.info("  Filtering out positive pairs (set difference)...")
         candidate_set = set(zip(sampled_phage_ids, sampled_host_ids))
-        logging.info(f"  Unique candidates: {len(candidate_set):,}")
+        logging.info(f"  Unique candidates: {len(candidate_set):,} (built in {time.time()-t0:.2f}s)")
         
+        t0 = time.time()
         negative_set = candidate_set - positive_set
-        logging.info(f"  After removing positives: {len(negative_set):,}")
+        logging.info(f"  After removing positives: {len(negative_set):,} (filtered in {time.time()-t0:.2f}s)")
         
         # Take only n_negatives
         negative_list = list(negative_set)[:n_negatives]
@@ -208,6 +214,7 @@ class NegativeExampleGenerator:
             )
         
         # Build records — look up full rows only for final pairs
+        t0 = time.time()
         logging.info(f"  Building {len(negative_list):,} negative records...")
         
         # Map IDs to row indices for fast .iloc lookups
@@ -221,7 +228,8 @@ class NegativeExampleGenerator:
             negatives.append(self._build_negative_record(phage, host))
         
         df = pd.DataFrame(negatives)
-        logging.info(f"  Generated {len(df):,} random negative pairs")
+        logging.info(f"  Built records in {time.time()-t0:.2f}s")
+        logging.info(f"  Generated {len(df):,} random negative pairs (total: {time.time()-t_total:.2f}s)")
         
         return df
     

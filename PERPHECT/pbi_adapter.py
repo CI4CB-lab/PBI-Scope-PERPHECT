@@ -21,6 +21,7 @@ Usage:
 """
 
 import math
+import time
 import logging
 from collections import OrderedDict
 from typing import Optional, Tuple, Dict, List, Generator
@@ -176,11 +177,14 @@ class PBIAdapter:
         if host_id in self._failed_hosts:
             return None
 
+        t0 = time.time()
         logger.debug(f"Cache miss — reading host {host_id} from disk...")
         try:
             seq = self.retriever.get_host_sequence(host_id, contig_mode="concat")
+            fetch_ms = (time.time() - t0) * 1000
             if seq and len(seq) >= self.bacterium_min_length:
                 self._host_sequences[host_id] = seq
+                logger.debug(f"  Host {host_id}: {len(seq):,} bp fetched in {fetch_ms:.0f}ms")
                 return seq
             else:
                 logger.debug(
@@ -201,11 +205,14 @@ class PBIAdapter:
         if phage_id in self._failed_phages:
             return None
 
+        t0 = time.time()
         logger.debug(f"Cache miss — reading phage {phage_id} from disk...")
         try:
             seq = self.retriever.get_phage_sequence(phage_id)
+            fetch_ms = (time.time() - t0) * 1000
             if seq and len(seq) >= self.phage_min_length:
                 self._phage_sequences[phage_id] = seq
+                logger.debug(f"  Phage {phage_id}: {len(seq):,} bp fetched in {fetch_ms:.0f}ms")
                 return seq
             else:
                 logger.debug(
@@ -500,9 +507,12 @@ class PBIAdapter:
         # Process positives
         total_pos = len(positive_pairs)
         logger.info(f"  Fetching sequences for {total_pos} positive pairs...")
+        t_start = time.time()
         for i, (_, row) in enumerate(positive_pairs.iterrows()):
-            if (i + 1) % 500 == 0 or i + 1 == total_pos:
-                logger.info(f"  Fetched {i + 1}/{total_pos} positive pairs")
+            if (i + 1) % 100 == 0 or i + 1 == total_pos:
+                elapsed = time.time() - t_start
+                rate = (i + 1) / elapsed if elapsed > 0 else 0
+                logger.info(f"  Fetched {i + 1}/{total_pos} positive pairs ({rate:.1f} pairs/s, {elapsed:.1f}s elapsed)")
 
             phage_id_str = row["Phage_ID"]
             host_id_str = row["Host_ID"]
@@ -526,9 +536,12 @@ class PBIAdapter:
         if negative_pairs is not None:
             total_neg = len(negative_pairs)
             logger.info(f"  Fetching sequences for {total_neg} negative pairs...")
+            t_start = time.time()
             for i, (_, row) in enumerate(negative_pairs.iterrows()):
-                if (i + 1) % 500 == 0 or i + 1 == total_neg:
-                    logger.info(f"  Fetched {i + 1}/{total_neg} negative pairs")
+                if (i + 1) % 100 == 0 or i + 1 == total_neg:
+                    elapsed = time.time() - t_start
+                    rate = (i + 1) / elapsed if elapsed > 0 else 0
+                    logger.info(f"  Fetched {i + 1}/{total_neg} negative pairs ({rate:.1f} pairs/s, {elapsed:.1f}s elapsed)")
 
                 phage_id_str = row["Phage_ID"]
                 host_id_str = row["Host_ID"]
@@ -570,6 +583,13 @@ class PBIAdapter:
             logger.info(f"Dropped {len(self._failed_hosts)} hosts with missing/too-short sequences")
         if self._failed_phages:
             logger.info(f"Dropped {len(self._failed_phages)} phages with missing/too-short sequences")
+        logger.info(
+            f"  Unique hosts encoded: {len(self._host_id_map)}, "
+            f"unique phages: {len(self._phage_id_map)}"
+        )
+        logger.info(
+            f"  Host LRU cache size: {len(self._host_encoded_lru)}/{self._host_encoded_lru_max}"
+        )
 
         return couples, labels, sources
 
