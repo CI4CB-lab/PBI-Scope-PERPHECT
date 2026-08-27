@@ -174,41 +174,51 @@ class NegativeExampleGenerator:
             logging.info("  Nothing to generate (ratio=0)")
             return pd.DataFrame(columns=["Phage_ID", "Host_ID", "Label"])
         
-        # Vectorized batch sampling — generate all candidates at once
+        # Work with ID arrays directly — avoid materializing large DataFrames
+        phage_ids = self.all_phages["Phage_ID"].values
+        host_ids = self.all_hosts["Host_ID"].values
+        logging.info(f"  Extracted {len(phage_ids):,} phage IDs, {len(host_ids):,} host IDs")
+        
         # Over-sample by max_attempts factor to account for positive collisions
         batch_size = n_negatives * max_attempts
-        logging.info(f"  Sampling {batch_size:,} candidate pairs in batch...")
+        logging.info(f"  Sampling {batch_size:,} candidate pairs...")
         
-        phage_indices = np.random.choice(len(self.all_phages), size=batch_size, replace=True)
-        host_indices = np.random.choice(len(self.all_hosts), size=batch_size, replace=True)
+        phage_indices = np.random.choice(len(phage_ids), size=batch_size, replace=True)
+        host_indices = np.random.choice(len(host_ids), size=batch_size, replace=True)
         
-        phages_sampled = self.all_phages.iloc[phage_indices].reset_index(drop=True)
-        hosts_sampled = self.all_hosts.iloc[host_indices].reset_index(drop=True)
+        sampled_phage_ids = phage_ids[phage_indices]
+        sampled_host_ids = host_ids[host_indices]
+        logging.info(f"  Sampled {len(sampled_phage_ids):,} candidate pairs")
         
-        all_phage_ids = phages_sampled["Phage_ID"].values
-        all_host_ids = hosts_sampled["Host_ID"].values
+        # Use set difference for fast filtering
+        logging.info("  Filtering out positive pairs (set difference)...")
+        candidate_set = set(zip(sampled_phage_ids, sampled_host_ids))
+        logging.info(f"  Unique candidates: {len(candidate_set):,}")
         
-        # Filter out positive pairs using vectorized operations
-        logging.info("  Filtering out positive pairs...")
-        is_negative = np.array([
-            (pid, hid) not in positive_set
-            for pid, hid in zip(all_phage_ids, all_host_ids)
-        ])
+        negative_set = candidate_set - positive_set
+        logging.info(f"  After removing positives: {len(negative_set):,}")
         
-        # Keep only the first n_negatives valid negatives
-        valid_indices = np.where(is_negative)[0][:n_negatives]
+        # Take only n_negatives
+        negative_list = list(negative_set)[:n_negatives]
         
-        if len(valid_indices) < n_negatives:
+        if len(negative_list) < n_negatives:
             logging.warning(
-                f"  Only found {len(valid_indices):,}/{n_negatives:,} unique negatives "
+                f"  Only found {len(negative_list):,}/{n_negatives:,} unique negatives "
                 f"(positive set covers a large fraction of the space)"
             )
         
-        logging.info(f"  Building {len(valid_indices):,} negative records...")
-        negatives = [
-            self._build_negative_record(phages_sampled.iloc[i], hosts_sampled.iloc[i])
-            for i in valid_indices
-        ]
+        # Build records — look up full rows only for final pairs
+        logging.info(f"  Building {len(negative_list):,} negative records...")
+        
+        # Index DataFrames by ID for fast lookup
+        phage_indexed = self.all_phages.set_index("Phage_ID")
+        host_indexed = self.all_hosts.set_index("Host_ID")
+        
+        negatives = []
+        for pid, hid in negative_list:
+            phage = phage_indexed.loc[pid]
+            host = host_indexed.loc[hid]
+            negatives.append(self._build_negative_record(phage, host))
         
         df = pd.DataFrame(negatives)
         logging.info(f"  Generated {len(df):,} random negative pairs")
