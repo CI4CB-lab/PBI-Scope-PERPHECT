@@ -122,7 +122,7 @@ class PBIAdapter:
             query += f" WHERE p.Source_DB NOT IN ({placeholders})"
         
         if shuffle:
-            query += " ORDER BY MD5(Phage_ID || Host_ID)"
+            query += " ORDER BY MD5(pha.Phage_ID || pha.Host_ID)"
         
         if exclude_sources:
             df = self.retriever.conn.execute(query, exclude_sources).fetchdf()

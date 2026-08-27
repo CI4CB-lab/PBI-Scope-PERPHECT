@@ -532,7 +532,7 @@ def main():
         JOIN fact_phages p ON pha.Phage_ID = p.Phage_ID
         WHERE p.Source_DB IN ({placeholders})
         """
-        query += " ORDER BY MD5(Phage_ID || Host_ID)"
+        query += " ORDER BY MD5(pha.Phage_ID || pha.Host_ID)"
         all_pairs = retriever.conn.execute(query, exclude_sources).fetchdf()
         logging.info(f"Fine-tuning mode: Found {len(all_pairs)} pairs from sources {exclude_sources}")
     else:
