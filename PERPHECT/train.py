@@ -464,7 +464,11 @@ def main():
             setattr(args, attr, fallback)
 
     # Setup
-    setup_logging(args.log_file, args.verbose)
+    log_file = (
+        Path(args.log_file) if Path(args.log_file).is_absolute()
+        else SCRIPT_DIR / args.log_file
+    ) if args.log_file else None
+    setup_logging(str(log_file) if log_file else None, args.verbose)
     logging.info("=" * 60)
     logging.info("PERPHECT Training Script")
     logging.info("=" * 60)

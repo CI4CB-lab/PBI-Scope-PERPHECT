@@ -151,6 +151,8 @@ class NegativeExampleGenerator:
         """
         Generate random negative pairs ensuring they don't exist in positive set.
         
+        Uses vectorized batch sampling for performance on large datasets.
+        
         Args:
             positive_pairs: DataFrame with Phage_ID and Host_ID columns
             ratio: Ratio of negatives to positives (1.0 = equal numbers)
@@ -158,45 +160,58 @@ class NegativeExampleGenerator:
         
         Returns:
             DataFrame with negative pairs (Phage_ID, Host_ID, Label=0)
-        
-        Example:
-            >>> positives = retriever.get_phage_host_pairs(limit=100)
-            >>> negatives = neg_gen.generate_random_negatives(positives, ratio=1.0)
         """
-        logging.info("🎲 Generating random negative examples...")
+        logging.info("Generating random negative examples...")
         
         n_negatives = int(len(positive_pairs) * ratio)
         positive_set = self._get_positive_set(positive_pairs)
         
-        logging.info(f"   Target: {n_negatives:,} negatives from {len(positive_pairs):,} positives")
-        logging.info(f"   Positive set size: {len(positive_set):,}")
+        logging.info(f"  Target: {n_negatives:,} negatives from {len(positive_pairs):,} positives")
+        logging.info(f"  Positive set size: {len(positive_set):,}")
+        logging.info(f"  Available phages: {len(self.all_phages):,}, hosts: {len(self.all_hosts):,}")
         
-        negatives = []
-        attempts = 0
-        max_total_attempts = n_negatives * max_attempts
+        if n_negatives == 0:
+            logging.info("  Nothing to generate (ratio=0)")
+            return pd.DataFrame(columns=["Phage_ID", "Host_ID", "Label"])
         
-        while len(negatives) < n_negatives and attempts < max_total_attempts:
-            # Random phage and host
-            phage = self.all_phages.sample(n=1).iloc[0]
-            host = self.all_hosts.sample(n=1).iloc[0]
-            
-            pair = (phage['Phage_ID'], host['Host_ID'])
-            
-            # Check if this is not a positive pair
-            if pair not in positive_set:
-                negatives.append(self._build_negative_record(phage, host))
-            
-            attempts += 1
-            
-            # Progress update
-            if len(negatives) % 100 == 0 and len(negatives) > 0:
-                logging.info(f"   Generated {len(negatives):,}/{n_negatives:,} negatives...")
+        # Vectorized batch sampling — generate all candidates at once
+        # Over-sample by max_attempts factor to account for positive collisions
+        batch_size = n_negatives * max_attempts
+        logging.info(f"  Sampling {batch_size:,} candidate pairs in batch...")
         
-        if len(negatives) < n_negatives:
-            logging.warning(f"⚠️  Only generated {len(negatives):,}/{n_negatives:,} negatives")
+        phage_indices = np.random.choice(len(self.all_phages), size=batch_size, replace=True)
+        host_indices = np.random.choice(len(self.all_hosts), size=batch_size, replace=True)
+        
+        phages_sampled = self.all_phages.iloc[phage_indices].reset_index(drop=True)
+        hosts_sampled = self.all_hosts.iloc(host_indices).reset_index(drop=True)
+        
+        all_phage_ids = phages_sampled["Phage_ID"].values
+        all_host_ids = hosts_sampled["Host_ID"].values
+        
+        # Filter out positive pairs using vectorized operations
+        logging.info("  Filtering out positive pairs...")
+        is_negative = np.array([
+            (pid, hid) not in positive_set
+            for pid, hid in zip(all_phage_ids, all_host_ids)
+        ])
+        
+        # Keep only the first n_negatives valid negatives
+        valid_indices = np.where(is_negative)[0][:n_negatives]
+        
+        if len(valid_indices) < n_negatives:
+            logging.warning(
+                f"  Only found {len(valid_indices):,}/{n_negatives:,} unique negatives "
+                f"(positive set covers a large fraction of the space)"
+            )
+        
+        logging.info(f"  Building {len(valid_indices):,} negative records...")
+        negatives = [
+            self._build_negative_record(phages_sampled.iloc[i], hosts_sampled.iloc[i])
+            for i in valid_indices
+        ]
         
         df = pd.DataFrame(negatives)
-        logging.info(f"✅ Generated {len(df):,} random negative pairs")
+        logging.info(f"  Generated {len(df):,} random negative pairs")
         
         return df
     
