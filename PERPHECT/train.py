@@ -402,6 +402,8 @@ def main():
     parser.add_argument("--phage-threshold", type=int, default=None, help="Max phage sequence length")
     parser.add_argument("--bacterium-min-length", type=int, default=None, help="Min bacteria length to keep")
     parser.add_argument("--phage-min-length", type=int, default=None, help="Min phage length to keep")
+    parser.add_argument("--disk-cache-dir", type=str, default=None,
+                        help="Directory for persistent encoding cache (skips re-encoding across runs)")
 
     # Output parameters
     parser.add_argument("--output-dir", type=str, default=None, help="Output directory (default: /results, mapped to ./outputs on host)")
@@ -524,12 +526,19 @@ def main():
 
     with _Timer("quick_connect (DB + FASTA init)"):
         retriever = quick_connect()
+
+    # Resolve disk cache directory (default: inside output dir)
+    disk_cache = args.disk_cache_dir
+    if disk_cache and not Path(disk_cache).is_absolute():
+        disk_cache = str(SCRIPT_DIR / disk_cache)
+
     adapter = PBIAdapter(
         retriever,
         bacterium_threshold=args.bacterium_threshold,
         phage_threshold=args.phage_threshold,
         bacterium_min_length=args.bacterium_min_length,
         phage_min_length=args.phage_min_length,
+        disk_cache_dir=disk_cache,
     )
 
     # Parse exclude-sources (list from config or comma-separated string)

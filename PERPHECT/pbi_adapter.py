@@ -20,10 +20,15 @@ Usage:
     gen = adapter.create_tf_generator(couples, labels, batch_size=16)
 """
 
+import hashlib
 import math
+import os
+import threading
 import time
 import logging
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
 from typing import Optional, Tuple, Dict, List, Generator
 
 import numpy as np
@@ -42,6 +47,17 @@ PHAGE_MIN_LENGTH = 1_500
 # Interaction types that map to label=0 (negative)
 NEGATIVE_INTERACTIONS = {"no interaction", "none", "negative", "non-interacting"}
 
+# Max workers for parallel sequence fetching (I/O-bound, so more is fine)
+_MAX_FETCH_WORKERS = 8
+
+
+def _encode_seq_hash(seq: str, max_length: int) -> str:
+    """Deterministic hash for a (sequence, max_length) pair — used as disk-cache key."""
+    h = hashlib.sha256()
+    h.update(seq[:max_length].encode("ascii", errors="replace"))
+    h.update(str(max_length).encode())
+    return h.hexdigest()[:16]
+
 
 class PBIAdapter:
     """
@@ -56,6 +72,9 @@ class PBIAdapter:
         phage_threshold: Max phage sequence length after padding (default 200K).
         bacterium_min_length: Minimum bacteria length to keep (default 150K).
         phage_min_length: Minimum phage length to keep (default 1.5K).
+        disk_cache_dir: Optional directory for persistent encoding cache.
+                        When set, encoded arrays are saved/loaded from disk
+                        across runs to skip re-encoding.
     """
 
     def __init__(
@@ -65,6 +84,7 @@ class PBIAdapter:
         phage_threshold: int = PHAGE_THRESHOLD,
         bacterium_min_length: int = BACTERIUM_MIN_LENGTH,
         phage_min_length: int = PHAGE_MIN_LENGTH,
+        disk_cache_dir: Optional[str] = None,
     ):
         self.retriever = retriever
         self.bacterium_threshold = bacterium_threshold
@@ -77,20 +97,68 @@ class PBIAdapter:
         self._phage_id_map: Dict[str, int] = {}
         self._next_host_id = 0
         self._next_phage_id = 0
+        self._id_map_lock = threading.Lock()
 
         # Sequence caches (raw strings)
         self._host_sequences: Dict[str, str] = {}
         self._phage_sequences: Dict[str, str] = {}
 
-        # Bounded LRU cache for host encoded arrays only.
-        # Hosts: ~5500 unique, 7M × 4 = 28MB each → cap at 200 = ~5.6GB.
-        # Phages: ~1.3M unique, 200K × 4 = 800KB each → NOT cached (re-encode on-the-fly).
+        # Bounded LRU cache for host encoded arrays.
+        # Hosts: ~5500 unique, 7M x 4 = 28MB each -> cap at 200 = ~5.6GB.
         self._host_encoded_lru: OrderedDict = OrderedDict()
         self._host_encoded_lru_max = 200
+
+        # Bounded LRU cache for phage encoded arrays.
+        # Phages: ~1.3M unique but training pairs touch a small subset.
+        # 200K x 4 = 800KB each -> cap at 500 = ~400MB.
+        self._phage_encoded_lru: OrderedDict = OrderedDict()
+        self._phage_encoded_lru_max = 500
+
+        # Disk cache for persistent encoding across runs
+        self._disk_cache_dir: Optional[Path] = Path(disk_cache_dir) if disk_cache_dir else None
+        if self._disk_cache_dir:
+            self._disk_cache_dir.mkdir(parents=True, exist_ok=True)
+            # Count existing entries
+            n_cached = sum(1 for _ in self._disk_cache_dir.glob("*.npy"))
+            if n_cached:
+                logger.info(f"Disk encoding cache: {n_cached} entries in {self._disk_cache_dir}")
 
         # Track IDs that failed to avoid repeated warnings
         self._failed_hosts: set = set()
         self._failed_phages: set = set()
+
+    # ------------------------------------------------------------------
+    # Disk encoding cache helpers
+    # ------------------------------------------------------------------
+
+    def _disk_cache_path(self, cache_key: str, prefix: str) -> Optional[Path]:
+        """Return the disk path for a cached encoded array, or None."""
+        if not self._disk_cache_dir:
+            return None
+        return self._disk_cache_dir / f"{prefix}_{cache_key}.npy"
+
+    def _load_from_disk_cache(self, seq: str, max_length: int, prefix: str) -> Optional[np.ndarray]:
+        """Try to load a pre-encoded array from disk cache."""
+        path = self._disk_cache_path(_encode_seq_hash(seq, max_length), prefix)
+        if path and path.exists():
+            try:
+                return np.load(str(path), allow_pickle=False)
+            except Exception:
+                pass
+        return None
+
+    def _save_to_disk_cache(self, arr: np.ndarray, seq: str, max_length: int, prefix: str):
+        """Persist an encoded array to disk cache."""
+        path = self._disk_cache_path(_encode_seq_hash(seq, max_length), prefix)
+        if path:
+            try:
+                np.save(str(path), arr, allow_pickle=False)
+            except Exception as e:
+                logger.debug(f"Disk cache write failed: {e}")
+
+    # ------------------------------------------------------------------
+    # Pair ID queries
+    # ------------------------------------------------------------------
 
     def get_pair_ids_only(self, shuffle: bool = False, exclude_sources: Optional[List[str]] = None) -> pd.DataFrame:
         """
@@ -116,22 +184,22 @@ class PBIAdapter:
         FROM phage_host_associations pha
         JOIN fact_phages p ON pha.Phage_ID = p.Phage_ID
         """
-        
+
         if exclude_sources:
             # Build parameterized IN clause
             placeholders = ", ".join(["?" for _ in exclude_sources])
             query += f" WHERE p.Source_DB NOT IN ({placeholders})"
-        
+
         if shuffle:
             query += " ORDER BY MD5(pha.Phage_ID || pha.Host_ID)"
-        
+
         if exclude_sources:
             df = self.retriever.conn.execute(query, exclude_sources).fetchdf()
         else:
             df = self.retriever.conn.execute(query).fetchdf()
-        
+
         logger.info(f"Queried {len(df):,} pair IDs (no sequences)")
-        
+
         if exclude_sources:
             logger.info(f"Excluded sources: {exclude_sources}")
 
@@ -156,19 +224,29 @@ class PBIAdapter:
             )
         return pairs
 
+    # ------------------------------------------------------------------
+    # ID mapping
+    # ------------------------------------------------------------------
+
     def _map_host_id(self, pbi_host_id: str) -> int:
         """Map a PBI-Scope Host_ID string to a PERPHECT integer ID."""
-        if pbi_host_id not in self._host_id_map:
-            self._host_id_map[pbi_host_id] = self._next_host_id
-            self._next_host_id += 1
-        return self._host_id_map[pbi_host_id]
+        with self._id_map_lock:
+            if pbi_host_id not in self._host_id_map:
+                self._host_id_map[pbi_host_id] = self._next_host_id
+                self._next_host_id += 1
+            return self._host_id_map[pbi_host_id]
 
     def _map_phage_id(self, pbi_phage_id: str) -> int:
         """Map a PBI-Scope Phage_ID string to a PERPHECT integer ID."""
-        if pbi_phage_id not in self._phage_id_map:
-            self._phage_id_map[pbi_phage_id] = self._next_phage_id
-            self._next_phage_id += 1
-        return self._phage_id_map[pbi_phage_id]
+        with self._id_map_lock:
+            if pbi_phage_id not in self._phage_id_map:
+                self._phage_id_map[pbi_phage_id] = self._next_phage_id
+                self._next_phage_id += 1
+            return self._phage_id_map[pbi_phage_id]
+
+    # ------------------------------------------------------------------
+    # Sequence fetching (raw strings)
+    # ------------------------------------------------------------------
 
     def _fetch_host_sequence(self, host_id: str) -> Optional[str]:
         """Fetch and cache a host sequence from PBI-Scope."""
@@ -198,8 +276,20 @@ class PBIAdapter:
             logger.warning(f"Failed to fetch host sequence for {host_id}: {e}")
             return None
 
-    def _fetch_phage_sequence(self, phage_id: str) -> Optional[str]:
-        """Fetch and cache a phage sequence from PBI-Scope."""
+    def _fetch_phage_sequence(
+        self,
+        phage_id: str,
+        source_db: Optional[str] = None,
+        source_type: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        Fetch and cache a phage sequence from PBI-Scope.
+
+        When source_db / source_type are provided the internal
+        ``_get_phage_sequence`` routing is used directly, avoiding a
+        per-phage DB query that the public ``get_phage_sequence()``
+        wrapper would perform.
+        """
         if phage_id in self._phage_sequences:
             return self._phage_sequences[phage_id]
         if phage_id in self._failed_phages:
@@ -208,7 +298,12 @@ class PBIAdapter:
         t0 = time.time()
         logger.debug(f"Cache miss — reading phage {phage_id} from disk...")
         try:
-            seq = self.retriever.get_phage_sequence(phage_id)
+            if source_db is not None:
+                seq = self.retriever._get_phage_sequence(
+                    phage_id, source_db=source_db, source_type=source_type
+                )
+            else:
+                seq = self.retriever.get_phage_sequence(phage_id)
             fetch_ms = (time.time() - t0) * 1000
             if seq and len(seq) >= self.phage_min_length:
                 self._phage_sequences[phage_id] = seq
@@ -226,25 +321,38 @@ class PBIAdapter:
             logger.warning(f"Failed to fetch phage sequence for {phage_id}: {e}")
             return None
 
-    def _pad_and_encode(self, sequence: str, max_length: int) -> np.ndarray:
+    # ------------------------------------------------------------------
+    # One-hot encoding (with disk + LRU caching)
+    # ------------------------------------------------------------------
+
+    def _pad_and_encode(self, sequence: str, max_length: int, cache_prefix: str = "seq") -> np.ndarray:
         """
         Zero-pad (or truncate) a sequence and convert to one-hot encoding.
+
+        Checks disk cache first, then encodes and persists to disk.
 
         Args:
             sequence: Raw DNA sequence string.
             max_length: Target length after padding.
+            cache_prefix: Prefix for disk cache filenames ('bact' or 'phage').
 
         Returns:
             numpy array of shape (max_length, 4), dtype uint8.
         """
-        # Truncate if too long
+        # 1. Try disk cache
+        cached = self._load_from_disk_cache(sequence, max_length, cache_prefix)
+        if cached is not None and cached.shape == (max_length, 4):
+            return cached
+
+        # 2. Encode from scratch
         truncated = sequence[:max_length]
-        # One-hot encode
         onehot = translate_sequence_onehot(truncated)
-        # Zero-pad if needed
         if onehot.shape[0] < max_length:
             padding = np.zeros((max_length - onehot.shape[0], 4), dtype=np.uint8)
             onehot = np.concatenate([onehot, padding], axis=0)
+
+        # 3. Persist to disk cache (best-effort)
+        self._save_to_disk_cache(onehot, sequence, max_length, cache_prefix)
         return onehot
 
     # ------------------------------------------------------------------
@@ -358,7 +466,9 @@ class PBIAdapter:
             for bacterium_id, seq in bacteria_seqs.items():
                 bacteria_data.append({
                     "bacterium_id": bacterium_id,
-                    "bacterium_sequence": self._pad_and_encode(seq, self.bacterium_threshold),
+                    "bacterium_sequence": self._pad_and_encode(
+                        seq, self.bacterium_threshold, cache_prefix="bact"
+                    ),
                 })
             bacteria_df = pd.DataFrame(bacteria_data).set_index("bacterium_id")
         else:
@@ -370,7 +480,9 @@ class PBIAdapter:
             for phage_id, seq in phage_seqs.items():
                 phage_data.append({
                     "phage_id": phage_id,
-                    "phage_sequence": self._pad_and_encode(seq, self.phage_threshold),
+                    "phage_sequence": self._pad_and_encode(
+                        seq, self.phage_threshold, cache_prefix="phage"
+                    ),
                 })
             phages_df = pd.DataFrame(phage_data).set_index("phage_id")
         else:
@@ -401,6 +513,9 @@ class PBIAdapter:
 
         This generator matches the signature of PERPHECT's original generator()
         function, yielding ([bacterium_samples, phage_samples], targets).
+
+        Both host and phage encoded arrays are cached in bounded LRU dicts
+        to avoid redundant one-hot encoding across batches.
 
         Args:
             couples: numpy array of shape (N, 2) with [bacterium_id, phage_id]
@@ -458,16 +573,27 @@ class PBIAdapter:
                     host_seq = self._host_sequences.get(host_id_str)
                     if host_seq is None:
                         continue
-                    host_arr = self._pad_and_encode(host_seq, self.bacterium_threshold)
+                    host_arr = self._pad_and_encode(
+                        host_seq, self.bacterium_threshold, cache_prefix="bact"
+                    )
                     self._host_encoded_lru[host_id_str] = host_arr
                     if len(self._host_encoded_lru) > self._host_encoded_lru_max:
                         self._host_encoded_lru.popitem(last=False)
 
-                # Phage: re-encode on-the-fly (200K × 4 = 800KB, ~5ms, too many unique to cache)
-                phage_seq = self._phage_sequences.get(phage_id_str)
-                if phage_seq is None:
-                    continue
-                phage_arr = self._pad_and_encode(phage_seq, self.phage_threshold)
+                # Phage: use bounded LRU cache to avoid re-encoding each batch
+                if phage_id_str in self._phage_encoded_lru:
+                    self._phage_encoded_lru.move_to_end(phage_id_str)
+                    phage_arr = self._phage_encoded_lru[phage_id_str]
+                else:
+                    phage_seq = self._phage_sequences.get(phage_id_str)
+                    if phage_seq is None:
+                        continue
+                    phage_arr = self._pad_and_encode(
+                        phage_seq, self.phage_threshold, cache_prefix="phage"
+                    )
+                    self._phage_encoded_lru[phage_id_str] = phage_arr
+                    if len(self._phage_encoded_lru) > self._phage_encoded_lru_max:
+                        self._phage_encoded_lru.popitem(last=False)
 
                 bacterium_samples[j] = host_arr
                 phage_samples[j] = phage_arr
@@ -479,6 +605,96 @@ class PBIAdapter:
     # Helper: prepare training data from PBI-Scope
     # ------------------------------------------------------------------
 
+    def _resolve_phage_source_batch(
+        self, phage_ids: List[str], pairs_df: pd.DataFrame
+    ) -> Dict[str, Tuple[Optional[str], Optional[str]]]:
+        """
+        Batch-resolve phage source_db and source_type from the pairs DataFrame
+        or from a single DB query, avoiding per-phage queries.
+
+        Returns:
+            Dict mapping Phage_ID -> (source_db, source_type)
+        """
+        result: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
+
+        # Prefer columns already present in the DataFrame
+        if "Phage_Source" in pairs_df.columns:
+            source_col = "Phage_Source"
+            # Determine source_type column name (may be Phage_Source_Type or source_type)
+            st_col = None
+            for c in ("Phage_Source_Type", "source_type"):
+                if c in pairs_df.columns:
+                    st_col = c
+                    break
+            for _, row in pairs_df.iterrows():
+                pid = row["Phage_ID"]
+                if pid not in result:
+                    sdb = row.get(source_col)
+                    stype = row.get(st_col) if st_col else None
+                    result[pid] = (sdb, stype)
+            if result:
+                return result
+
+        # Fallback: single batched DB query
+        unique_ids = list(set(phage_ids))
+        if not unique_ids:
+            return result
+        try:
+            placeholders = ", ".join(["?" for _ in unique_ids])
+            source_df = self.retriever.conn.execute(
+                f"SELECT Phage_ID, Source_DB, source_type FROM fact_phages "
+                f"WHERE Phage_ID IN ({placeholders})",
+                unique_ids,
+            ).fetchdf()
+            for _, row in source_df.iterrows():
+                result[row["Phage_ID"]] = (row["Source_DB"], row["source_type"])
+        except Exception as exc:
+            logger.debug(f"Batch source query failed, falling back to per-phage: {exc}")
+
+        return result
+
+    def _fetch_pair_batch(
+        self,
+        pairs: List[Tuple[str, str]],
+        source_info: Dict[str, Tuple[Optional[str], Optional[str]]],
+        label: int,
+        pair_sources: Optional[Dict[Tuple[str, str], str]] = None,
+    ) -> List[Tuple[int, int, int, str]]:
+        """
+        Fetch sequences for a batch of pairs, filtering by length.
+
+        Args:
+            pairs: List of (phage_id, host_id) string tuples.
+            source_info: Phage source routing info from _resolve_phage_source_batch.
+            label: Integer label (1 for positive, 0 for negative).
+            pair_sources: Optional per-pair source tag mapping
+                         {(phage_id, host_id): source_tag}. When None, uses "positive".
+
+        Returns:
+            list of (host_id_int, phage_id_int, label, source_tag) records.
+        """
+        records = []
+        for phage_id_str, host_id_str in pairs:
+            sdb, stype = source_info.get(phage_id_str, (None, None))
+            phage_seq = self._fetch_phage_sequence(phage_id_str, source_db=sdb, source_type=stype)
+            host_seq = self._fetch_host_sequence(host_id_str)
+
+            if phage_seq is None or host_seq is None:
+                continue
+            if len(host_seq) < self.bacterium_min_length:
+                continue
+            if len(phage_seq) < self.phage_min_length:
+                continue
+
+            phage_id_int = self._map_phage_id(phage_id_str)
+            host_id_int = self._map_host_id(host_id_str)
+            if pair_sources:
+                src = pair_sources.get((phage_id_str, host_id_str), "positive")
+            else:
+                src = "positive"
+            records.append((host_id_int, phage_id_int, label, src))
+        return records
+
     def prepare_training_data(
         self,
         positive_pairs: pd.DataFrame,
@@ -489,6 +705,11 @@ class PBIAdapter:
 
         This loads and caches all sequences, filters by length, and returns
         the couple/label/source arrays needed by create_tf_generator().
+
+        Improvements over the naive approach:
+        - Batch DB query for phage source routing (avoids per-phage queries)
+        - Parallel sequence fetching via thread pool
+        - Persistent disk encoding cache across runs
 
         Args:
             positive_pairs: DataFrame with Phage_ID, Host_ID columns.
@@ -504,63 +725,91 @@ class PBIAdapter:
         """
         records = []
 
-        # Process positives
+        # ---- Phase 1: batch-resolve phage sources for ALL pairs upfront ----
+        all_phage_ids = list(positive_pairs["Phage_ID"])
+        all_host_ids = list(positive_pairs["Host_ID"])
+        if negative_pairs is not None and len(negative_pairs) > 0:
+            all_phage_ids.extend(negative_pairs["Phage_ID"].tolist())
+            all_host_ids.extend(negative_pairs["Host_ID"].tolist())
+
+        logger.info(f"  Batch-resolving phage sources for {len(set(all_phage_ids)):,} unique phages...")
+        t0 = time.time()
+        source_info = self._resolve_phage_source_batch(all_phage_ids, positive_pairs)
+        logger.info(f"  Source resolution done in {time.time()-t0:.2f}s ({len(source_info):,} entries)")
+
+        # ---- Phase 2: parallel sequence fetching for positives ----
         total_pos = len(positive_pairs)
-        logger.info(f"  Fetching sequences for {total_pos} positive pairs...")
+        logger.info(f"  Fetching sequences for {total_pos} positive pairs (parallel)...")
+
+        pos_pairs = list(zip(positive_pairs["Phage_ID"], positive_pairs["Host_ID"]))
+
+        # Split into chunks for parallel processing
+        chunk_size = max(1, len(pos_pairs) // _MAX_FETCH_WORKERS)
+        pos_chunks = [pos_pairs[i:i + chunk_size] for i in range(0, len(pos_pairs), chunk_size)]
+
         t_start = time.time()
-        for i, (_, row) in enumerate(positive_pairs.iterrows()):
-            if (i + 1) % 100 == 0 or i + 1 == total_pos:
+        with ThreadPoolExecutor(max_workers=_MAX_FETCH_WORKERS) as executor:
+            futures = {
+                executor.submit(
+                    self._fetch_pair_batch, chunk, source_info, 1
+                ): i
+                for i, chunk in enumerate(pos_chunks)
+            }
+            done_count = 0
+            for future in as_completed(futures):
+                chunk_records = future.result()
+                records.extend(chunk_records)
+                done_count += len(chunk_records)
                 elapsed = time.time() - t_start
-                rate = (i + 1) / elapsed if elapsed > 0 else 0
-                logger.info(f"  Fetched {i + 1}/{total_pos} positive pairs ({rate:.1f} pairs/s, {elapsed:.1f}s elapsed)")
+                if elapsed > 0:
+                    logger.info(
+                        f"  Positive batches: {done_count}/{total_pos} valid pairs "
+                        f"({done_count/elapsed:.1f} pairs/s, {elapsed:.1f}s elapsed)"
+                    )
 
-            phage_id_str = row["Phage_ID"]
-            host_id_str = row["Host_ID"]
-
-            phage_seq = self._fetch_phage_sequence(phage_id_str)
-            host_seq = self._fetch_host_sequence(host_id_str)
-
-            if phage_seq is None or host_seq is None:
-                continue
-            if len(host_seq) < self.bacterium_min_length:
-                continue
-            if len(phage_seq) < self.phage_min_length:
-                continue
-
-            phage_id_int = self._map_phage_id(phage_id_str)
-            host_id_int = self._map_host_id(host_id_str)
-
-            records.append((host_id_int, phage_id_int, 1, "positive"))
-
-        # Process negatives
-        if negative_pairs is not None:
+        # ---- Phase 3: parallel sequence fetching for negatives ----
+        if negative_pairs is not None and len(negative_pairs) > 0:
             total_neg = len(negative_pairs)
-            logger.info(f"  Fetching sequences for {total_neg} negative pairs...")
+            logger.info(f"  Fetching sequences for {total_neg} negative pairs (parallel)...")
+
+            neg_pairs = list(zip(negative_pairs["Phage_ID"], negative_pairs["Host_ID"]))
+            neg_sources = negative_pairs.get(
+                "negative_source",
+                pd.Series(["generated"] * len(negative_pairs)),
+            ).tolist()
+
+            # Build per-pair source tag mapping
+            pair_sources = {
+                (pid, hid): src
+                for (pid, hid), src in zip(neg_pairs, neg_sources)
+            }
+
+            chunk_size = max(1, len(neg_pairs) // _MAX_FETCH_WORKERS)
+            neg_chunks = [
+                neg_pairs[i:i + chunk_size]
+                for i in range(0, len(neg_pairs), chunk_size)
+            ]
+
             t_start = time.time()
-            for i, (_, row) in enumerate(negative_pairs.iterrows()):
-                if (i + 1) % 100 == 0 or i + 1 == total_neg:
+            with ThreadPoolExecutor(max_workers=_MAX_FETCH_WORKERS) as executor:
+                futures = {
+                    executor.submit(
+                        self._fetch_pair_batch, chunk, source_info, 0, pair_sources
+                    ): i
+                    for i, chunk in enumerate(neg_chunks)
+                }
+
+                done_count = 0
+                for future in as_completed(futures):
+                    chunk_records = future.result()
+                    records.extend(chunk_records)
+                    done_count += len(chunk_records)
                     elapsed = time.time() - t_start
-                    rate = (i + 1) / elapsed if elapsed > 0 else 0
-                    logger.info(f"  Fetched {i + 1}/{total_neg} negative pairs ({rate:.1f} pairs/s, {elapsed:.1f}s elapsed)")
-
-                phage_id_str = row["Phage_ID"]
-                host_id_str = row["Host_ID"]
-
-                phage_seq = self._fetch_phage_sequence(phage_id_str)
-                host_seq = self._fetch_host_sequence(host_id_str)
-
-                if phage_seq is None or host_seq is None:
-                    continue
-                if len(host_seq) < self.bacterium_min_length:
-                    continue
-                if len(phage_seq) < self.phage_min_length:
-                    continue
-
-                phage_id_int = self._map_phage_id(phage_id_str)
-                host_id_int = self._map_host_id(host_id_str)
-
-                source = row.get("negative_source", "generated")
-                records.append((host_id_int, phage_id_int, 0, source))
+                    if elapsed > 0:
+                        logger.info(
+                            f"  Negative batches: {done_count}/{total_neg} valid pairs "
+                            f"({done_count/elapsed:.1f} pairs/s, {elapsed:.1f}s elapsed)"
+                        )
 
         if not records:
             raise ValueError(
@@ -584,11 +833,12 @@ class PBIAdapter:
         if self._failed_phages:
             logger.info(f"Dropped {len(self._failed_phages)} phages with missing/too-short sequences")
         logger.info(
-            f"  Unique hosts encoded: {len(self._host_id_map)}, "
+            f"  Unique hosts: {len(self._host_id_map)}, "
             f"unique phages: {len(self._phage_id_map)}"
         )
         logger.info(
-            f"  Host LRU cache size: {len(self._host_encoded_lru)}/{self._host_encoded_lru_max}"
+            f"  Host LRU: {len(self._host_encoded_lru)}/{self._host_encoded_lru_max}, "
+            f"Phage LRU: {len(self._phage_encoded_lru)}/{self._phage_encoded_lru_max}"
         )
 
         return couples, labels, sources
