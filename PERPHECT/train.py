@@ -17,7 +17,7 @@ Usage:
 
     # Override specific parameters
     docker compose run --rm analysis python /workspace/PERPHECT/train.py \
-        --epochs 20 --batch-size 32 --output-dir /results/my_run
+        --epochs 20 --batch-size 64 --output-dir /results/my_run
 
     # Force CPU even if GPU available
     docker compose run --rm analysis python /workspace/PERPHECT/train.py \
@@ -30,14 +30,19 @@ import logging
 import math
 import os
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
-# Disable cuDNN autotuning and XLA to prevent autotuning failures on some GPU configs
-os.environ["TF_CUDNN_USE_AUTOTUNER"] = "0"
-os.environ["CUDNN_USE_AUTOTUNER"] = "0"
-os.environ["TF_XLA_FLAGS"] = "--tf_xla_enable_xla_devices=false"
+# Enable cuDNN autotuning and XLA for GPU performance.
+# These can be disabled by setting environment variables before running:
+#   TF_CUDNN_USE_AUTOTUNER=0 CUDNN_USE_AUTOTUNER=0 python train.py ...
+os.environ["TF_CUDNN_USE_AUTOTUNER"] = "1"
+os.environ["CUDNN_USE_AUTOTUNER"] = "1"
+if "TF_XLA_FLAGS" not in os.environ:
+    os.environ["TF_XLA_FLAGS"] = "--tf_xla_enable_xla_devices=true"
 
+import functools
 import numpy as np
 import pandas as pd
 
@@ -59,6 +64,24 @@ def setup_logging(log_file=None, verbose=False):
     logging.basicConfig(level=level, format=fmt, datefmt=datefmt, handlers=handlers)
 
 
+class _Timer:
+    """Simple context-manager timer that logs elapsed seconds."""
+
+    def __init__(self, label: str):
+        self.label = label
+        self.start = None
+        self.elapsed = None
+
+    def __enter__(self):
+        self.start = time.time()
+        logging.info(f"  [{self.label}] starting...")
+        return self
+
+    def __exit__(self, *_):
+        self.elapsed = time.time() - self.start
+        logging.info(f"  [{self.label}] done in {self.elapsed:.1f}s")
+
+
 # ---------------------------------------------------------------------------
 # GPU detection
 # ---------------------------------------------------------------------------
@@ -73,7 +96,21 @@ def detect_gpu(gpu_device=0):
             logging.info(f"cuDNN version: {tf.sysconfig.get_build_info().get('cudnn_version', 'unknown')}")
         except Exception:
             pass
-        tf.config.optimizer.set_jit(False)
+
+        # Enable XLA and cuDNN autotuning for performance
+        try:
+            tf.config.optimizer.set_jit(True)
+            logging.info("XLA JIT compilation enabled")
+        except Exception as e:
+            logging.warning(f"Could not enable XLA JIT: {e}. Continuing without XLA.")
+
+        try:
+            os.environ["TF_CUDNN_USE_AUTOTUNER"] = "1"
+            os.environ["CUDNN_USE_AUTOTUNER"] = "1"
+            logging.info("cuDNN autotuning enabled")
+        except Exception as e:
+            logging.warning(f"Could not enable cuDNN autotuning: {e}")
+
         gpus = tf.config.list_physical_devices("GPU")
         if gpus:
             logging.info(f"GPU detected: {len(gpus)} device(s)")
@@ -172,8 +209,77 @@ def focal_loss(gamma=2.0, alpha=0.25):
     return loss
 
 
+def freeze_base_layers(model, up_to_layer="concatenated_features"):
+    """Freeze base encoder layers up to (and including) the specified layer."""
+    for layer in model.layers:
+        layer.trainable = False
+        if layer.name == up_to_layer:
+            break
+    trainable_count = sum(1 for l in model.layers if l.trainable)
+    total_count = len(model.layers)
+    logging.info(f"Frozen layers up to '{up_to_layer}': {total_count - trainable_count}/{total_count} frozen, {trainable_count} trainable")
+    return trainable_count
+
+
+def load_or_build_model(args, bacterium_threshold, phage_threshold, is_finetuning=False):
+    """Load pre-trained model or build new one. Returns (model, is_finetuning_flag)."""
+    import keras
+    
+    if args.pretrained_model:
+        logging.info(f"Loading pre-trained model from {args.pretrained_model}")
+        model = keras.models.load_model(
+            args.pretrained_model,
+            custom_objects={"focal_loss": focal_loss}
+        )
+        is_finetuning = True
+        
+        if args.freeze_base:
+            freeze_base_layers(model, args.freeze_up_to)
+        
+        # Recompile with fine-tuning LR
+        lr = args.fine_tune_lr if is_finetuning else args.learning_rate
+        optimizer = keras.optimizers.Adam(learning_rate=lr)
+        try:
+            model.compile(
+                optimizer,
+                focal_loss(gamma=args.focal_gamma, alpha=args.focal_alpha),
+                metrics=["accuracy", keras.metrics.AUC(name="auc")],
+                jit_compile=True,
+            )
+        except Exception as e:
+            logging.warning(f"jit_compile=True failed ({e}), falling back to jit_compile=False")
+            model.compile(
+                optimizer,
+                focal_loss(gamma=args.focal_gamma, alpha=args.focal_alpha),
+                metrics=["accuracy", keras.metrics.AUC(name="auc")],
+                jit_compile=False,
+            )
+        logging.info(f"Model loaded for {'fine-tuning' if is_finetuning else 'training'} with LR={lr}")
+        return model, True
+    else:
+        model = build_model(bacterium_threshold, phage_threshold)
+        optimizer = keras.optimizers.Adam(learning_rate=args.learning_rate)
+        try:
+            model.compile(
+                optimizer,
+                focal_loss(gamma=args.focal_gamma, alpha=args.focal_alpha),
+                metrics=["accuracy", keras.metrics.AUC(name="auc")],
+                jit_compile=True,
+            )
+        except Exception as e:
+            logging.warning(f"jit_compile=True failed ({e}), falling back to jit_compile=False")
+            model.compile(
+                optimizer,
+                focal_loss(gamma=args.focal_gamma, alpha=args.focal_alpha),
+                metrics=["accuracy", keras.metrics.AUC(name="auc")],
+                jit_compile=False,
+            )
+        logging.info(f"New model built for training with LR={args.learning_rate}")
+        return model, False
+
+
 def _train_fold(fold_num, adapter, X_train, y_train, X_valid, y_valid,
-                X_test, y_test, args, output_dir):
+                X_test, y_test, args, output_dir, test_pair_ids=None):
     """Train and evaluate a single fold. Returns dict of fold metrics."""
     import keras
 
@@ -191,21 +297,16 @@ def _train_fold(fold_num, adapter, X_train, y_train, X_valid, y_valid,
     fold_dir = output_dir / f"fold_{fold_num}"
     fold_dir.mkdir(parents=True, exist_ok=True)
 
-    # Build model
-    model = build_model(args.bacterium_threshold, args.phage_threshold)
-    optimizer = keras.optimizers.Adam(learning_rate=args.learning_rate)
-    model.compile(
-        optimizer,
-        focal_loss(gamma=args.focal_gamma, alpha=args.focal_alpha),
-        metrics=["accuracy", keras.metrics.AUC(name="auc")],
-        jit_compile=False,
+    # Build or load model
+    model, is_finetuning_fold = load_or_build_model(
+        args, args.bacterium_threshold, args.phage_threshold, is_finetuning=False
     )
 
-    # Generators
-    train_gen = adapter.create_tf_generator(
+    # tf.data pipeline with prefetching
+    train_ds = adapter.create_tf_dataset(
         X_train, y_train, batch_size=args.batch_size, shuffle=True
     )
-    valid_gen = adapter.create_tf_generator(
+    valid_ds = adapter.create_tf_dataset(
         X_valid, y_valid, batch_size=args.batch_size, shuffle=False
     )
     valid_steps = math.ceil(len(X_valid) / args.batch_size)
@@ -233,8 +334,8 @@ def _train_fold(fold_num, adapter, X_train, y_train, X_valid, y_valid,
 
     # Train
     history = model.fit(
-        train_gen, steps_per_epoch=steps_per_epoch,
-        epochs=args.epochs, validation_data=valid_gen,
+        train_ds, steps_per_epoch=steps_per_epoch,
+        epochs=args.epochs, validation_data=valid_ds,
         validation_steps=valid_steps, callbacks=callbacks,
     )
 
@@ -242,31 +343,35 @@ def _train_fold(fold_num, adapter, X_train, y_train, X_valid, y_valid,
     model.save(str(fold_dir / "model_final.keras"))
 
     # Test evaluation
-    test_gen = adapter.create_tf_generator(
+    test_ds = adapter.create_tf_dataset(
         X_test, y_test, batch_size=args.batch_size, shuffle=False
     )
     test_steps = math.ceil(len(X_test) / args.batch_size)
-    test_predictions = model.predict(test_gen, steps=test_steps)
+    test_predictions = model.predict(test_ds, steps=test_steps)
     test_pred_labels = (test_predictions.flatten() > 0.5).astype(int)
 
     from sklearn.metrics import classification_report, matthews_corrcoef, confusion_matrix
     report = classification_report(
-        y_test, test_pred_labels, target_names=["Negative", "Positive"]
+        y_test, test_pred_labels, labels=[0, 1], target_names=["Negative", "Positive"]
     )
     mcc = matthews_corrcoef(y_test, test_pred_labels)
-    tn, fp, fn, tp = confusion_matrix(y_test, test_pred_labels).ravel()
+    tn, fp, fn, tp = confusion_matrix(y_test, test_pred_labels, labels=[0, 1]).ravel()
     sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
 
     logging.info(f"  MCC: {mcc:.4f}  Sensitivity: {sensitivity:.4f}  Specificity: {specificity:.4f}")
 
-    results_df = pd.DataFrame({
+    results_data = {
         "bacterium_id": X_test[:, 0],
-        "phage_id": X_test[:, 1],
+        "phage_id_int": X_test[:, 1],
         "observations": y_test,
         "predictions": test_predictions.flatten(),
         "prediction_labels": test_pred_labels,
-    })
+    }
+    if test_pair_ids is not None:
+        results_data["host_id"] = test_pair_ids["host_id"].values
+        results_data["phage_id"] = test_pair_ids["phage_id"].values
+    results_df = pd.DataFrame(results_data)
     results_df.to_csv(str(fold_dir / "results_test_set.csv"), index=False)
 
     # Save summary
@@ -300,6 +405,8 @@ def _train_fold(fold_num, adapter, X_train, y_train, X_valid, y_valid,
 # ---------------------------------------------------------------------------
 
 def main():
+    SCRIPT_DIR = Path(__file__).parent
+
     parser = argparse.ArgumentParser(
         description="Train PERPHECT phage-host interaction predictor",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -307,37 +414,52 @@ def main():
     )
 
     # Training parameters
-    parser.add_argument("--epochs", type=int, default=10, help="Number of training epochs (default: 10)")
-    parser.add_argument("--batch-size", type=int, default=4, help="Batch size (default: 4)")
+    # Defaults are None so config file values can override them.
+    # Hardcoded fallbacks are applied after config loading.
+    parser.add_argument("--epochs", type=int, default=None, help="Number of training epochs (default: 10)")
+    parser.add_argument("--batch-size", type=int, default=None, help="Batch size (default: 64)")
     parser.add_argument("--steps-per-epoch", type=int, default=None, help="Batches per epoch (None = cover full training set)")
-    parser.add_argument("--patience", type=int, default=5, help="Early stopping patience (default: 5)")
-    parser.add_argument("--learning-rate", type=float, default=0.0004, help="Initial learning rate (default: 0.0004)")
+    parser.add_argument("--patience", type=int, default=None, help="Early stopping patience (default: 5)")
+    parser.add_argument("--learning-rate", type=float, default=None, help="Initial learning rate (default: 0.0004)")
 
     # Data parameters
     parser.add_argument("--limit", type=int, default=None, help="Limit positive pairs (None = all)")
-    parser.add_argument("--negative-ratio", type=float, default=1.0,
+    parser.add_argument("--exclude-ids", type=str, default=None, help="CSV with Phage_ID,Host_ID to exclude (config-only)")
+    parser.add_argument("--exclude-sources", nargs="*", type=str, default=None, help="Source_DB values to exclude (config-only)")
+    parser.add_argument("--negative-ratio", type=float, default=None,
                         help="Max synthetic negatives as multiple of private negatives "
                              "(1.0 = match private count, 2.0 = 2x, 0.0 = no synthetic). "
                              "Default: 1.0 (gives ~50/50 balance before filtering)")
-    parser.add_argument("--focal-alpha", type=float, default=0.25,
+    parser.add_argument("--focal-alpha", type=float, default=None,
                         help="Focal loss positive-class weight (default: 0.25)")
-    parser.add_argument("--focal-gamma", type=float, default=2.0,
+    parser.add_argument("--focal-gamma", type=float, default=None,
                         help="Focal loss focusing parameter (default: 2.0)")
-    parser.add_argument("--bacterium-threshold", type=int, default=7_000_000, help="Max bacteria sequence length")
-    parser.add_argument("--phage-threshold", type=int, default=200_000, help="Max phage sequence length")
-    parser.add_argument("--bacterium-min-length", type=int, default=150_000, help="Min bacteria length to keep")
-    parser.add_argument("--phage-min-length", type=int, default=1_500, help="Min phage length to keep")
+    parser.add_argument("--bacterium-threshold", type=int, default=None, help="Max bacteria sequence length")
+    parser.add_argument("--phage-threshold", type=int, default=None, help="Max phage sequence length")
+    parser.add_argument("--bacterium-min-length", type=int, default=None, help="Min bacteria length to keep")
+    parser.add_argument("--phage-min-length", type=int, default=None, help="Min phage length to keep")
+    parser.add_argument("--disk-cache-dir", type=str, default=None,
+                        help="Directory for persistent encoding cache (skips re-encoding across runs)")
 
     # Output parameters
-    parser.add_argument("--output-dir", type=str, default="/results", help="Output directory (default: /results, mapped to ./outputs on host)")
+    parser.add_argument("--output-dir", type=str, default=None, help="Output directory (default: /results, mapped to ./outputs on host)")
     parser.add_argument("--run-name", type=str, default=None, help="Run name (default: timestamp)")
 
     # Configuration
-    parser.add_argument("--config", type=str, default=None, help="YAML config file (overrides CLI args)")
-    parser.add_argument("--cross-validate", type=int, default=0, help="K folds for stratified K-fold CV (0 = disabled)")
-    parser.add_argument("--exclude-ids", type=str, default=None, help="CSV with Phage_ID,Host_ID to exclude from training (prevents data leakage from held-out test set)")
+    parser.add_argument("--config", type=str, default=None, help="YAML config file")
+    parser.add_argument("--profile", type=str, default=None, help="Profile name from config (e.g., 'pretrain', 'finetune')")
+    parser.add_argument("--cross-validate", type=int, default=None, help="K folds for stratified K-fold CV (overrides config)")
+    
+    # Pre-trained model / fine-tuning
+    parser.add_argument("--pretrained-model", type=str, default=None, help="Path to pre-trained .keras model to load (enables fine-tuning mode)")
+    parser.add_argument("--freeze-base", action="store_true", help="Freeze CNN encoder layers, only train classification head")
+    parser.add_argument("--freeze-up-to", type=str, default=None, help="Freeze layers up to this layer name (default: concatenated_features)")
+    parser.add_argument("--fine-tune-lr", type=float, default=None, help="Learning rate for fine-tuning (default: 0.0001)")
+    parser.add_argument("--fine-tune-epochs", type=int, default=None, help="Epochs for fine-tuning (default: 5)")
+    parser.add_argument("--finetuned-model-name", type=str, default=None, help="Output name for fine-tuned best model")
+    
     parser.add_argument("--no-gpu", action="store_true", help="Force CPU even if GPU available")
-    parser.add_argument("--gpu-device", type=int, default=0, help="GPU device index (default: 0, use 1 for second GPU)")
+    parser.add_argument("--gpu-device", type=int, default=None, help="GPU device index (default: 0)")
     parser.add_argument("--verbose", "-v", action="store_true", help="Verbose logging")
     parser.add_argument("--log-file", type=str, default=None, help="Log to file in addition to console")
 
@@ -346,20 +468,64 @@ def main():
     # Load config file if provided
     if args.config:
         import yaml
-        with open(args.config) as f:
+        config_path = Path(args.config) if Path(args.config).is_absolute() else SCRIPT_DIR / args.config
+        with open(config_path) as f:
             config = yaml.safe_load(f)
-        # Config values override defaults but not explicit CLI args
+
+        # Resolve which config section to use: defaults + optional profile overlay
+        if "defaults" in config:
+            merged = config["defaults"]
+        else:
+            merged = config  # backward compat: flat config treated as defaults
+
+        if args.profile:
+            profiles = config.get("profiles", {})
+            if args.profile not in profiles:
+                available = list(profiles.keys()) if profiles else "(none)"
+                raise ValueError(
+                    f"Profile '{args.profile}' not found in {args.config}. "
+                    f"Available profiles: {available}"
+                )
+            profile = profiles[args.profile]
+            for section in ["training", "data", "output", "gpu"]:
+                if section in profile:
+                    if section not in merged:
+                        merged[section] = {}
+                    merged[section].update(profile[section])
+            logging.info(f"Using profile: {args.profile}")
+
+        # Apply config values to args (only when CLI arg was not explicitly set)
         for section in ["training", "data", "output", "gpu"]:
-            if section in config:
-                for key, value in config[section].items():
+            if section in merged:
+                for key, value in merged[section].items():
                     attr = key.replace("-", "_")
-                    # Only apply if the CLI arg is at its default value
-                    current = getattr(args, attr, None)
-                    if current is not None:
-                        setattr(args, attr, value)
+                    section_key = f"{section}_{attr}"
+                    # Pick the attribute name that matches an actual argparse dest
+                    target = attr if hasattr(args, attr) else section_key
+                    if getattr(args, target, None) is None:
+                        setattr(args, target, value)
+
+    # Hardcoded fallback defaults (used when neither CLI nor config provides a value)
+    _defaults = {
+        "epochs": 10, "batch_size": 64, "patience": 5, "learning_rate": 0.0004,
+        "negative_ratio": 1.0, "focal_alpha": 0.25, "focal_gamma": 2.0,
+        "bacterium_threshold": 7_000_000, "phage_threshold": 200_000,
+        "bacterium_min_length": 150_000, "phage_min_length": 1_500,
+        "output_dir": "/results", "gpu_device": 0,
+        "freeze_up_to": "concatenated_features",
+        "fine_tune_lr": 0.0001, "fine_tune_epochs": 5,
+        "finetuned_model_name": "model_finetuned_best.keras",
+    }
+    for attr, fallback in _defaults.items():
+        if getattr(args, attr, None) is None:
+            setattr(args, attr, fallback)
 
     # Setup
-    setup_logging(args.log_file, args.verbose)
+    log_file = (
+        Path(args.log_file) if Path(args.log_file).is_absolute()
+        else SCRIPT_DIR / args.log_file
+    ) if args.log_file else None
+    setup_logging(str(log_file) if log_file else None, args.verbose)
     logging.info("=" * 60)
     logging.info("PERPHECT Training Script")
     logging.info("=" * 60)
@@ -394,42 +560,86 @@ def main():
     from pbi_adapter import PBIAdapter
     from sklearn.model_selection import train_test_split, StratifiedKFold
 
-    retriever = quick_connect()
+    with _Timer("quick_connect (DB + FASTA init)"):
+        retriever = quick_connect()
+
+    # Resolve disk cache directory (default: inside output dir)
+    disk_cache = args.disk_cache_dir
+    if disk_cache and not Path(disk_cache).is_absolute():
+        disk_cache = str(SCRIPT_DIR / disk_cache)
+
     adapter = PBIAdapter(
         retriever,
         bacterium_threshold=args.bacterium_threshold,
         phage_threshold=args.phage_threshold,
         bacterium_min_length=args.bacterium_min_length,
         phage_min_length=args.phage_min_length,
+        disk_cache_dir=disk_cache,
     )
+
+    # Parse exclude-sources (list from config or comma-separated string)
+    exclude_sources = None
+    if args.exclude_sources:
+        if isinstance(args.exclude_sources, list):
+            exclude_sources = [s.strip() for s in args.exclude_sources if s.strip()]
+        else:
+            exclude_sources = [s.strip() for s in args.exclude_sources.split(",") if s.strip()]
+        logging.info(f"Excluding sources: {exclude_sources}")
+
+    is_finetuning = args.pretrained_model is not None
 
     # Phase 1: Query pair IDs only (fast — no sequences fetched)
     logging.info("Querying pair IDs from database...")
-    all_pairs = adapter.get_pair_ids_only(shuffle=True)
-    logging.info(f"Found {len(all_pairs)} pairs in database")
+    
+    with _Timer("Query pair IDs from DB"):
+        if is_finetuning:
+            # FINE-TUNING MODE: Only use the excluded sources
+            if not exclude_sources:
+                raise ValueError("--exclude-sources is required for fine-tuning mode")
+            
+            # Query ONLY the specified sources for fine-tuning
+            placeholders = ", ".join(["?" for _ in exclude_sources])
+            query = f"""
+            SELECT DISTINCT pha.Phage_ID, pha.Host_ID
+            FROM phage_host_associations pha
+            JOIN fact_phages p ON pha.Phage_ID = p.Phage_ID
+            WHERE p.Source_DB IN ({placeholders})
+            """
+            query += " ORDER BY MD5(pha.Phage_ID || pha.Host_ID)"
+            all_pairs = retriever.conn.execute(query, exclude_sources).fetchdf()
+            logging.info(f"Fine-tuning mode: Found {len(all_pairs)} pairs from sources {exclude_sources}")
+        else:
+            # PRE-TRAINING MODE: Exclude specified sources
+            all_pairs = adapter.get_pair_ids_only(shuffle=True, exclude_sources=exclude_sources)
+            logging.info(f"Pre-training mode: Found {len(all_pairs)} pairs in database (excluded sources: {exclude_sources})")
 
     # Exclude held-out test pairs if specified
     if args.exclude_ids:
-        exclude_path = Path(args.exclude_ids)
-        if exclude_path.exists():
-            exclude_df = pd.read_csv(exclude_path)
-            exclude_set = set(zip(exclude_df["Phage_ID"], exclude_df["Host_ID"]))
-            before = len(all_pairs)
-            all_pairs = all_pairs[
-                ~all_pairs.apply(
-                    lambda r: (r["Phage_ID"], r["Host_ID"]) in exclude_set, axis=1
+        with _Timer("Exclude held-out test pairs"):
+            exclude_path = Path(args.exclude_ids) if Path(args.exclude_ids).is_absolute() else SCRIPT_DIR / args.exclude_ids
+            if exclude_path.exists():
+                exclude_df = pd.read_csv(exclude_path)
+                exclude_set = set(zip(exclude_df["Phage_ID"], exclude_df["Host_ID"]))
+                before = len(all_pairs)
+                all_pairs = all_pairs[
+                    ~all_pairs.apply(
+                        lambda r: (r["Phage_ID"], r["Host_ID"]) in exclude_set, axis=1
+                    )
+                ].reset_index(drop=True)
+                logging.info(
+                    f"Excluded {before - len(all_pairs)} test pairs from {exclude_path} "
+                    f"({len(all_pairs)} remaining)"
                 )
-            ].reset_index(drop=True)
-            logging.info(
-                f"Excluded {before - len(all_pairs)} test pairs from {exclude_path} "
-                f"({len(all_pairs)} remaining)"
-            )
-        else:
-            logging.warning(f"--exclude-ids file not found: {exclude_path}")
+            else:
+                raise FileNotFoundError(
+                    f"--exclude-ids file not found: {exclude_path}. "
+                    "Run 01_prepare_test_set.ipynb first to create the excluded pairs CSV."
+                )
 
     # Classify pairs by interaction type (before applying limit!)
     logging.info("Classifying pairs by interaction type...")
-    positive_pairs, private_negatives = adapter.classify_pairs_by_interaction(all_pairs)
+    with _Timer("Classify pairs by interaction"):
+        positive_pairs, private_negatives = adapter.classify_pairs_by_interaction(all_pairs)
 
     # Apply limit to positive pairs only (private negatives are always included)
     if args.limit and len(positive_pairs) > args.limit:
@@ -463,26 +673,30 @@ def main():
     target_count = min(len(positive_pairs), max_generated)
     effective_ratio = target_count / len(positive_pairs) if len(positive_pairs) > 0 else 0
     logging.info(f"  Target: {target_count} synthetic negatives (ratio={effective_ratio:.3f})")
-    generated_negatives = neg_gen.generate_random_negatives(
-        positive_pairs, ratio=effective_ratio
-    )
+    with _Timer("Generate synthetic negatives"):
+        generated_negatives = neg_gen.generate_random_negatives(
+            positive_pairs, ratio=effective_ratio
+        )
 
     # Deduplicate against private negatives
+    # NOTE: Generated negatives are NOT deduped against the --exclude-ids test set.
+    # Collision probability is negligible (billions of possible phage-host pairs).
     if len(private_negatives) > 0:
-        private_neg_set = set(
-            zip(private_negatives["Phage_ID"], private_negatives["Host_ID"])
-        )
-        before_dedup = len(generated_negatives)
-        generated_negatives = generated_negatives[
-            ~generated_negatives.apply(
-                lambda r: (r["Phage_ID"], r["Host_ID"]) in private_neg_set, axis=1
+        with _Timer("Deduplicate generated vs private negatives"):
+            private_neg_set = set(
+                zip(private_negatives["Phage_ID"], private_negatives["Host_ID"])
             )
-        ].reset_index(drop=True)
-        if before_dedup - len(generated_negatives) > 0:
-            logging.info(
-                f"  Removed {before_dedup - len(generated_negatives)} duplicates "
-                f"against existing private negatives"
-            )
+            before_dedup = len(generated_negatives)
+            generated_negatives = generated_negatives[
+                ~generated_negatives.apply(
+                    lambda r: (r["Phage_ID"], r["Host_ID"]) in private_neg_set, axis=1
+                )
+            ].reset_index(drop=True)
+            if before_dedup - len(generated_negatives) > 0:
+                logging.info(
+                    f"  Removed {before_dedup - len(generated_negatives)} duplicates "
+                    f"against existing private negatives"
+                )
 
     generated_negatives["negative_source"] = "generated"
     logging.info(f"  Generated: {len(generated_negatives)} synthetic negative pairs")
@@ -503,27 +717,44 @@ def main():
 
     # Prepare training data
     logging.info("Preparing training data (fetching sequences, padding, encoding)...")
-    couples, labels, sources = adapter.prepare_training_data(positive_pairs, negative_pairs)
+    with _Timer("prepare_training_data (fetch + encode all pairs)"):
+        couples, labels, sources = adapter.prepare_training_data(positive_pairs, negative_pairs)
     logging.info(
         f"Total pairs: {len(couples)} "
-        f"({int(labels.sum())} positive, {int(len(labels) - labels.sum())} negative)"
+        f"({int(labels.sum())} positive, {int(len(labels) - labels.sum())} negative"
+        f")"
     )
+
+    # Build pair_ids DataFrame for traceability (maps integer indices back to string IDs)
+    reverse_host = {v: k for k, v in adapter.host_id_map.items()}
+    reverse_phage = {v: k for k, v in adapter.phage_id_map.items()}
+    pair_ids = pd.DataFrame({
+        "host_id": [reverse_host.get(int(c[0]), str(c[0])) for c in couples],
+        "phage_id": [reverse_phage.get(int(c[1]), str(c[1])) for c in couples],
+        "label": labels.astype(int),
+        "source": sources,
+    })
+    pair_ids.to_csv(str(output_dir / "pairs_all.csv"), index=False)
+    logging.info(f"Saved all pair IDs to {output_dir / 'pairs_all.csv'}")
 
     # -----------------------------------------------------------------------
     # Train/validation/test split (stratified by label AND source)
     # -----------------------------------------------------------------------
     logging.info("Splitting data into train/validation/test (stratified)...")
-    stratify_key = np.array([
-        "pos" if l == 1 else f"neg_{s}"
-        for l, s in zip(labels, sources)
-    ])
+    with _Timer("Train/test/val split"):
+        stratify_key = np.array([
+            "pos" if l == 1 else f"neg_{s}"
+            for l, s in zip(labels, sources)
+        ])
 
     # -----------------------------------------------------------------------
     # Branch: Cross-validation or standard split
     # -----------------------------------------------------------------------
-    if args.cross_validate > 0:
+    if (args.cross_validate or 0) > 0:
+        if args.pretrained_model:
+            raise ValueError("Cross-validation (--cross-validate) is not supported with fine-tuning (--pretrained-model). Use standard split for fine-tuning.")
         # ---- K-fold cross-validation ----
-        k = args.cross_validate
+        k = args.cross_validate or 0
         logging.info(f"Starting {k}-fold stratified cross-validation...")
 
         skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=42)
@@ -547,13 +778,28 @@ def main():
                 stratify=fold_strat, test_size=0.2, shuffle=True, random_state=42
             )
 
+            # Propagate pair_ids through this fold's splits
+            fold_pair_ids = pair_ids.iloc[test_idx].reset_index(drop=True)
+            fold_train_pair_ids, fold_val_pair_ids = train_test_split(
+                pair_ids.iloc[train_idx].reset_index(drop=True),
+                stratify=fold_strat, test_size=0.2, shuffle=True, random_state=42
+            )
+
             summary = _train_fold(
                 fold_num, adapter,
                 X_fold_train, y_fold_train,
                 X_fold_val, y_fold_val,
                 X_fold_test, y_fold_test,
                 args, output_dir,
+                test_pair_ids=fold_pair_ids,
             )
+
+            # Save per-fold pair IDs for traceability
+            fold_dir = output_dir / f"fold_{fold_num}"
+            fold_train_pair_ids.to_csv(str(fold_dir / "pairs_train.csv"), index=False)
+            fold_val_pair_ids.to_csv(str(fold_dir / "pairs_val.csv"), index=False)
+            fold_pair_ids.to_csv(str(fold_dir / "pairs_test.csv"), index=False)
+
             fold_summaries.append(summary)
 
         # Aggregate CV results
@@ -567,6 +813,7 @@ def main():
                 "private_data": len(private_negatives),
                 "generated": len(generated_negatives),
             },
+            "pair_ids_file": "pairs_all.csv",
             "mean_val_auc": float(np.mean([s["best_val_auc"] for s in fold_summaries])),
             "std_val_auc": float(np.std([s["best_val_auc"] for s in fold_summaries])),
             "mean_val_loss": float(np.mean([s["best_val_loss"] for s in fold_summaries])),
@@ -595,6 +842,9 @@ def main():
             couples, labels, sources,
             stratify=stratify_key, test_size=0.3, shuffle=True, random_state=42
         )
+        pairs_train, pairs_test = train_test_split(
+            pair_ids, stratify=stratify_key, test_size=0.3, shuffle=True, random_state=42
+        )
 
         stratify_key_test = np.array([
             "pos" if l == 1 else f"neg_{s}"
@@ -604,6 +854,14 @@ def main():
             X_test, y_test, s_test,
             stratify=stratify_key_test, test_size=0.5, shuffle=True, random_state=42
         )
+        pairs_val, pairs_test = train_test_split(
+            pairs_test, stratify=stratify_key_test, test_size=0.5, shuffle=True, random_state=42
+        )
+
+        # Save per-split pair IDs for traceability
+        pairs_train.to_csv(str(output_dir / "pairs_train.csv"), index=False)
+        pairs_val.to_csv(str(output_dir / "pairs_val.csv"), index=False)
+        pairs_test.to_csv(str(output_dir / "pairs_test.csv"), index=False)
 
         logging.info(f"Split: train={len(X_train)}, valid={len(X_valid)}, test={len(X_test)}")
 
@@ -613,16 +871,9 @@ def main():
             logging.info(f"  {split_name}: {dist}")
 
         # Build model
-        logging.info("Building PERPHECT model...")
-        model = build_model(args.bacterium_threshold, args.phage_threshold)
-
-        import keras
-        optimizer = keras.optimizers.Adam(learning_rate=args.learning_rate)
-        model.compile(
-            optimizer,
-            focal_loss(gamma=args.focal_gamma, alpha=args.focal_alpha),
-            metrics=["accuracy", keras.metrics.AUC(name="auc")],
-            jit_compile=False,
+        logging.info("Building/loading PERPHECT model...")
+        model, is_finetuning = load_or_build_model(
+            args, args.bacterium_threshold, args.phage_threshold, is_finetuning=args.pretrained_model is not None
         )
         model.summary()
 
@@ -640,13 +891,25 @@ def main():
         # Training
         logging.info("Starting training...")
 
-        train_gen = adapter.create_tf_generator(
+        train_ds = adapter.create_tf_dataset(
             X_train, y_train, batch_size=args.batch_size, shuffle=True
         )
-        valid_gen = adapter.create_tf_generator(
+        valid_ds = adapter.create_tf_dataset(
             X_valid, y_valid, batch_size=args.batch_size, shuffle=False
         )
         valid_steps = math.ceil(len(X_valid) / args.batch_size)
+
+        # Determine training parameters based on mode
+        if is_finetuning:
+            train_epochs = args.fine_tune_epochs
+            train_lr = args.fine_tune_lr
+            best_model_name = args.finetuned_model_name
+            logging.info(f"Fine-tuning mode: epochs={train_epochs}, lr={train_lr}, best_model={best_model_name}")
+        else:
+            train_epochs = args.epochs
+            train_lr = args.learning_rate
+            best_model_name = "model_best.keras"
+            logging.info(f"Training mode: epochs={train_epochs}, lr={train_lr}")
 
         # Auto-calculate steps_per_epoch if not set
         steps_per_epoch = args.steps_per_epoch
@@ -656,22 +919,22 @@ def main():
 
         callbacks = [
             keras.callbacks.ModelCheckpoint(
-                filepath=str(output_dir / "model_best.keras"),
+                filepath=str(output_dir / best_model_name),
                 monitor="val_auc", mode="max", save_best_only=True,
             ),
             keras.callbacks.EarlyStopping(
                 monitor="val_auc", mode="max", patience=args.patience, restore_best_weights=True,
             ),
             keras.callbacks.LearningRateScheduler(
-                lambda epoch: step_decay(epoch, args.learning_rate)
+                lambda epoch: step_decay(epoch, train_lr)
             ),
             keras.callbacks.CSVLogger(str(output_dir / "training_log.csv")),
             ValidationProgressCallback(valid_steps),
         ]
 
         history = model.fit(
-            train_gen, steps_per_epoch=steps_per_epoch,
-            epochs=args.epochs, validation_data=valid_gen,
+            train_ds, steps_per_epoch=steps_per_epoch,
+            epochs=train_epochs, validation_data=valid_ds,
             validation_steps=valid_steps, callbacks=callbacks,
         )
 
@@ -697,19 +960,19 @@ def main():
 
         # Test evaluation
         logging.info("Evaluating on test set...")
-        test_gen = adapter.create_tf_generator(
+        test_ds = adapter.create_tf_dataset(
             X_test, y_test, batch_size=args.batch_size, shuffle=False
         )
         test_steps = math.ceil(len(X_test) / args.batch_size)
-        test_predictions = model.predict(test_gen, steps=test_steps)
+        test_predictions = model.predict(test_ds, steps=test_steps)
         test_pred_labels = (test_predictions.flatten() > 0.5).astype(int)
 
         from sklearn.metrics import classification_report, matthews_corrcoef, confusion_matrix
         report = classification_report(
-            y_test, test_pred_labels, target_names=["Negative", "Positive"]
+            y_test, test_pred_labels, labels=[0, 1], target_names=["Negative", "Positive"]
         )
         mcc = matthews_corrcoef(y_test, test_pred_labels)
-        tn, fp, fn, tp = confusion_matrix(y_test, test_pred_labels).ravel()
+        tn, fp, fn, tp = confusion_matrix(y_test, test_pred_labels, labels=[0, 1]).ravel()
         sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
         specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
 
@@ -717,8 +980,10 @@ def main():
         logging.info(f"MCC: {mcc:.4f}  Sensitivity: {sensitivity:.4f}  Specificity: {specificity:.4f}")
 
         results_df = pd.DataFrame({
+            "host_id": pairs_test["host_id"].values,
+            "phage_id": pairs_test["phage_id"].values,
             "bacterium_id": X_test[:, 0],
-            "phage_id": X_test[:, 1],
+            "phage_id_int": X_test[:, 1],
             "observations": y_test,
             "predictions": test_predictions.flatten(),
             "prediction_labels": test_pred_labels,
@@ -737,6 +1002,7 @@ def main():
                 "private_data": n_private_neg,
                 "generated": n_generated_neg,
             },
+            "pair_ids_file": "pairs_all.csv",
             "train_size": len(X_train),
             "valid_size": len(X_valid),
             "test_size": len(X_test),
