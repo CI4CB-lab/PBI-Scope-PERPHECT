@@ -352,10 +352,10 @@ def _train_fold(fold_num, adapter, X_train, y_train, X_valid, y_valid,
 
     from sklearn.metrics import classification_report, matthews_corrcoef, confusion_matrix
     report = classification_report(
-        y_test, test_pred_labels, target_names=["Negative", "Positive"]
+        y_test, test_pred_labels, labels=[0, 1], target_names=["Negative", "Positive"]
     )
     mcc = matthews_corrcoef(y_test, test_pred_labels)
-    tn, fp, fn, tp = confusion_matrix(y_test, test_pred_labels).ravel()
+    tn, fp, fn, tp = confusion_matrix(y_test, test_pred_labels, labels=[0, 1]).ravel()
     sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
     specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
 
@@ -969,10 +969,10 @@ def main():
 
         from sklearn.metrics import classification_report, matthews_corrcoef, confusion_matrix
         report = classification_report(
-            y_test, test_pred_labels, target_names=["Negative", "Positive"]
+            y_test, test_pred_labels, labels=[0, 1], target_names=["Negative", "Positive"]
         )
         mcc = matthews_corrcoef(y_test, test_pred_labels)
-        tn, fp, fn, tp = confusion_matrix(y_test, test_pred_labels).ravel()
+        tn, fp, fn, tp = confusion_matrix(y_test, test_pred_labels, labels=[0, 1]).ravel()
         sensitivity = tp / (tp + fn) if (tp + fn) > 0 else 0.0
         specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
 

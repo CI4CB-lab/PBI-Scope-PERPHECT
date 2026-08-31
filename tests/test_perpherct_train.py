@@ -306,25 +306,27 @@ class TestTrainingPaths:
 
         # Mock pair IDs (positive pairs)
         pos_pairs = pd.DataFrame({
-            "Phage_ID": [f"phage_{i}" for i in range(20)],
-            "Host_ID": [f"host_{i}" for i in range(20)],
+            "Phage_ID": [f"phage_{i}" for i in range(15)],
+            "Host_ID": [f"host_{i}" for i in range(15)],
         })
 
         # Mock negative pairs (from private data)
         neg_pairs = pd.DataFrame({
-            "Phage_ID": [f"phage_neg_{i}" for i in range(10)],
-            "Host_ID": [f"host_neg_{i}" for i in range(10)],
+            "Phage_ID": [f"phage_neg_{i}" for i in range(15)],
+            "Host_ID": [f"host_neg_{i}" for i in range(15)],
         })
 
-        # Training data arrays (20 pos + 10 neg = 30 total)
+        # Training data arrays (15 pos + 15 neg = 30 total, interleaved)
+        # Interleaving ensures every contiguous slice has both classes
         n_total = 30
         couples = np.column_stack([
             np.arange(n_total),  # host IDs (integers)
             np.arange(n_total),  # phage IDs (integers)
         ])
-        labels = np.array([1] * 20 + [0] * 10, dtype=np.float32)
+        labels = np.array([1, 0] * 15, dtype=np.float32)
         sources = np.array(
-            ["positive"] * 20 + ["private_data"] * 10, dtype=object
+            ["positive" if l == 1 else "private_data" for l in labels],
+            dtype=object,
         )
 
         return config_path, pos_pairs, neg_pairs, couples, labels, sources
