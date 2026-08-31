@@ -17,7 +17,7 @@ Usage:
 
     # Override specific parameters
     docker compose run --rm analysis python /workspace/PERPHECT/train.py \
-        --epochs 20 --batch-size 32 --output-dir /results/my_run
+        --epochs 20 --batch-size 64 --output-dir /results/my_run
 
     # Force CPU even if GPU available
     docker compose run --rm analysis python /workspace/PERPHECT/train.py \
@@ -34,11 +34,15 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-# Disable cuDNN autotuning and XLA to prevent autotuning failures on some GPU configs
-os.environ["TF_CUDNN_USE_AUTOTUNER"] = "0"
-os.environ["CUDNN_USE_AUTOTUNER"] = "0"
-os.environ["TF_XLA_FLAGS"] = "--tf_xla_enable_xla_devices=false"
+# Enable cuDNN autotuning and XLA for GPU performance.
+# These can be disabled by setting environment variables before running:
+#   TF_CUDNN_USE_AUTOTUNER=0 CUDNN_USE_AUTOTUNER=0 python train.py ...
+os.environ["TF_CUDNN_USE_AUTOTUNER"] = "1"
+os.environ["CUDNN_USE_AUTOTUNER"] = "1"
+if "TF_XLA_FLAGS" not in os.environ:
+    os.environ["TF_XLA_FLAGS"] = "--tf_xla_enable_xla_devices=true"
 
+import functools
 import numpy as np
 import pandas as pd
 
@@ -92,7 +96,21 @@ def detect_gpu(gpu_device=0):
             logging.info(f"cuDNN version: {tf.sysconfig.get_build_info().get('cudnn_version', 'unknown')}")
         except Exception:
             pass
-        tf.config.optimizer.set_jit(False)
+
+        # Enable XLA and cuDNN autotuning for performance
+        try:
+            tf.config.optimizer.set_jit(True)
+            logging.info("XLA JIT compilation enabled")
+        except Exception as e:
+            logging.warning(f"Could not enable XLA JIT: {e}. Continuing without XLA.")
+
+        try:
+            os.environ["TF_CUDNN_USE_AUTOTUNER"] = "1"
+            os.environ["CUDNN_USE_AUTOTUNER"] = "1"
+            logging.info("cuDNN autotuning enabled")
+        except Exception as e:
+            logging.warning(f"Could not enable cuDNN autotuning: {e}")
+
         gpus = tf.config.list_physical_devices("GPU")
         if gpus:
             logging.info(f"GPU detected: {len(gpus)} device(s)")
@@ -221,23 +239,41 @@ def load_or_build_model(args, bacterium_threshold, phage_threshold, is_finetunin
         # Recompile with fine-tuning LR
         lr = args.fine_tune_lr if is_finetuning else args.learning_rate
         optimizer = keras.optimizers.Adam(learning_rate=lr)
-        model.compile(
-            optimizer,
-            focal_loss(gamma=args.focal_gamma, alpha=args.focal_alpha),
-            metrics=["accuracy", keras.metrics.AUC(name="auc")],
-            jit_compile=False,
-        )
+        try:
+            model.compile(
+                optimizer,
+                focal_loss(gamma=args.focal_gamma, alpha=args.focal_alpha),
+                metrics=["accuracy", keras.metrics.AUC(name="auc")],
+                jit_compile=True,
+            )
+        except Exception as e:
+            logging.warning(f"jit_compile=True failed ({e}), falling back to jit_compile=False")
+            model.compile(
+                optimizer,
+                focal_loss(gamma=args.focal_gamma, alpha=args.focal_alpha),
+                metrics=["accuracy", keras.metrics.AUC(name="auc")],
+                jit_compile=False,
+            )
         logging.info(f"Model loaded for {'fine-tuning' if is_finetuning else 'training'} with LR={lr}")
         return model, True
     else:
         model = build_model(bacterium_threshold, phage_threshold)
         optimizer = keras.optimizers.Adam(learning_rate=args.learning_rate)
-        model.compile(
-            optimizer,
-            focal_loss(gamma=args.focal_gamma, alpha=args.focal_alpha),
-            metrics=["accuracy", keras.metrics.AUC(name="auc")],
-            jit_compile=False,
-        )
+        try:
+            model.compile(
+                optimizer,
+                focal_loss(gamma=args.focal_gamma, alpha=args.focal_alpha),
+                metrics=["accuracy", keras.metrics.AUC(name="auc")],
+                jit_compile=True,
+            )
+        except Exception as e:
+            logging.warning(f"jit_compile=True failed ({e}), falling back to jit_compile=False")
+            model.compile(
+                optimizer,
+                focal_loss(gamma=args.focal_gamma, alpha=args.focal_alpha),
+                metrics=["accuracy", keras.metrics.AUC(name="auc")],
+                jit_compile=False,
+            )
         logging.info(f"New model built for training with LR={args.learning_rate}")
         return model, False
 
@@ -266,11 +302,11 @@ def _train_fold(fold_num, adapter, X_train, y_train, X_valid, y_valid,
         args, args.bacterium_threshold, args.phage_threshold, is_finetuning=False
     )
 
-    # Generators
-    train_gen = adapter.create_tf_generator(
+    # tf.data pipeline with prefetching
+    train_ds = adapter.create_tf_dataset(
         X_train, y_train, batch_size=args.batch_size, shuffle=True
     )
-    valid_gen = adapter.create_tf_generator(
+    valid_ds = adapter.create_tf_dataset(
         X_valid, y_valid, batch_size=args.batch_size, shuffle=False
     )
     valid_steps = math.ceil(len(X_valid) / args.batch_size)
@@ -298,8 +334,8 @@ def _train_fold(fold_num, adapter, X_train, y_train, X_valid, y_valid,
 
     # Train
     history = model.fit(
-        train_gen, steps_per_epoch=steps_per_epoch,
-        epochs=args.epochs, validation_data=valid_gen,
+        train_ds, steps_per_epoch=steps_per_epoch,
+        epochs=args.epochs, validation_data=valid_ds,
         validation_steps=valid_steps, callbacks=callbacks,
     )
 
@@ -307,11 +343,11 @@ def _train_fold(fold_num, adapter, X_train, y_train, X_valid, y_valid,
     model.save(str(fold_dir / "model_final.keras"))
 
     # Test evaluation
-    test_gen = adapter.create_tf_generator(
+    test_ds = adapter.create_tf_dataset(
         X_test, y_test, batch_size=args.batch_size, shuffle=False
     )
     test_steps = math.ceil(len(X_test) / args.batch_size)
-    test_predictions = model.predict(test_gen, steps=test_steps)
+    test_predictions = model.predict(test_ds, steps=test_steps)
     test_pred_labels = (test_predictions.flatten() > 0.5).astype(int)
 
     from sklearn.metrics import classification_report, matthews_corrcoef, confusion_matrix
@@ -381,7 +417,7 @@ def main():
     # Defaults are None so config file values can override them.
     # Hardcoded fallbacks are applied after config loading.
     parser.add_argument("--epochs", type=int, default=None, help="Number of training epochs (default: 10)")
-    parser.add_argument("--batch-size", type=int, default=None, help="Batch size (default: 32)")
+    parser.add_argument("--batch-size", type=int, default=None, help="Batch size (default: 64)")
     parser.add_argument("--steps-per-epoch", type=int, default=None, help="Batches per epoch (None = cover full training set)")
     parser.add_argument("--patience", type=int, default=None, help="Early stopping patience (default: 5)")
     parser.add_argument("--learning-rate", type=float, default=None, help="Initial learning rate (default: 0.0004)")
@@ -471,7 +507,7 @@ def main():
 
     # Hardcoded fallback defaults (used when neither CLI nor config provides a value)
     _defaults = {
-        "epochs": 10, "batch_size": 32, "patience": 5, "learning_rate": 0.0004,
+        "epochs": 10, "batch_size": 64, "patience": 5, "learning_rate": 0.0004,
         "negative_ratio": 1.0, "focal_alpha": 0.25, "focal_gamma": 2.0,
         "bacterium_threshold": 7_000_000, "phage_threshold": 200_000,
         "bacterium_min_length": 150_000, "phage_min_length": 1_500,
@@ -855,10 +891,10 @@ def main():
         # Training
         logging.info("Starting training...")
 
-        train_gen = adapter.create_tf_generator(
+        train_ds = adapter.create_tf_dataset(
             X_train, y_train, batch_size=args.batch_size, shuffle=True
         )
-        valid_gen = adapter.create_tf_generator(
+        valid_ds = adapter.create_tf_dataset(
             X_valid, y_valid, batch_size=args.batch_size, shuffle=False
         )
         valid_steps = math.ceil(len(X_valid) / args.batch_size)
@@ -897,8 +933,8 @@ def main():
         ]
 
         history = model.fit(
-            train_gen, steps_per_epoch=steps_per_epoch,
-            epochs=train_epochs, validation_data=valid_gen,
+            train_ds, steps_per_epoch=steps_per_epoch,
+            epochs=train_epochs, validation_data=valid_ds,
             validation_steps=valid_steps, callbacks=callbacks,
         )
 
@@ -924,11 +960,11 @@ def main():
 
         # Test evaluation
         logging.info("Evaluating on test set...")
-        test_gen = adapter.create_tf_generator(
+        test_ds = adapter.create_tf_dataset(
             X_test, y_test, batch_size=args.batch_size, shuffle=False
         )
         test_steps = math.ceil(len(X_test) / args.batch_size)
-        test_predictions = model.predict(test_gen, steps=test_steps)
+        test_predictions = model.predict(test_ds, steps=test_steps)
         test_pred_labels = (test_predictions.flatten() > 0.5).astype(int)
 
         from sklearn.metrics import classification_report, matthews_corrcoef, confusion_matrix

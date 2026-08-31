@@ -45,7 +45,7 @@ The `PBIAdapter` translates between PBI-Scope's data format and PERPHECT's expec
 | **One-hot encoding** | Converts `"ATGC..."` strings to `(length, 4)` numpy arrays via a 256-entry LUT. |
 | **LRU host cache** | `OrderedDict` with max 200 entries (~5.6GB cap). Hosts are reused across epochs; phages are re-encoded on the fly (~5ms). |
 | **Interaction classification** | Queries `private_interactions` table. Labels: `"no interaction"` / `"none"` / `"negative"` → 0, everything else → 1. |
-| **TF generator** | Yields `([bact_batch, phage_batch], labels)` indefinitely for `model.fit()`. |
+| **TF data pipeline** | Uses `tf.data.Dataset` with `.prefetch(AUTOTUNE)` to overlap data loading with GPU compute. Wraps a generator with LRU caching for memory-efficient streaming. |
 
 ### Data Sources
 
@@ -91,6 +91,16 @@ Outputs: `test_data/test_set.csv`, `test_data/test_set.npz`, `test_data/excluded
 # Quick test (1000 pairs, 3 epochs)
 docker compose run --rm analysis \
   python /workspace/PERPHECT/train.py --limit 1000 --epochs 3
+
+# Production training (100K pairs, 5 epochs — fast convergence)
+docker compose run --rm analysis \
+  python /workspace/PERPHECT/train.py --config /workspace/PERPHECT/config.yaml \
+    --limit 100000 --epochs 5 --patience 3 --gpu-device 3
+
+# Full training (all data, 15 epochs)
+docker compose run --rm analysis \
+  python /workspace/PERPHECT/train.py --config /workspace/PERPHECT/config.yaml \
+    --gpu-device 3
 
 # Pre-training (excludes private data, 5-fold CV)
 docker compose run --rm analysis \
@@ -156,7 +166,7 @@ Uses a `defaults` + `profiles` structure. Priority: **CLI args > profile overrid
 defaults:
   training:
     epochs: 15
-    batch_size: 32
+    batch_size: 64
     patience: 5
     learning_rate: 0.0004
     focal_alpha: 0.25
@@ -203,7 +213,7 @@ Parameters like `exclude_ids` and `exclude_sources` are config-only — not CLI 
 | Argument | Default | Description |
 |---|---|---|
 | `--epochs` | 15 | Training epochs |
-| `--batch-size` | 32 | Batch size |
+| `--batch-size` | 64 | Batch size |
 | `--steps-per-epoch` | None | Batches per epoch (None = full dataset) |
 | `--patience` | 5 | Early stopping patience |
 | `--learning-rate` | 0.0004 | Initial learning rate |
@@ -339,15 +349,63 @@ python -m pytest tests/test_perpherct_*.py
 
 Test coverage:
 - `test_perpherct_transforms.py` — one-hot encoding edge cases
-- `test_perpherct_adapter.py` — ID mapping, encoding, generators, interaction classification
+- `test_perpherct_adapter.py` — ID mapping, encoding, generators, tf.data pipeline, interaction classification
 - `test_perpherct_model.py` — model building (skipped without keras)
 - `test_perpherct_train.py` — CLI args, config loading, profile merging, full pretrain/finetune paths (mocked)
 - `test_perpherct_plotting.py` — training history plots
 
+## Performance Optimization
+
+### GPU Acceleration
+
+Training enables the following GPU optimizations by default:
+
+| Feature | Description | How to Disable |
+|---|---|---|
+| **XLA JIT** | Compiles TensorFlow ops into fused GPU kernels | `TF_XLA_FLAGS="--tf_xla_enable_xla_devices=false"` |
+| **cuDNN autotuning** | Tries multiple cuDNN algorithms to find the fastest | `TF_CUDNN_USE_AUTOTUNER=0` |
+| **jit_compile** | Keras-level JIT compilation for the training step | Falls back automatically on error |
+
+All features have try/except fallback — if they cause errors on your GPU, training continues without them.
+
+### tf.data Pipeline
+
+Data is loaded via `tf.data.Dataset` with `.prefetch(tf.data.AUTOTUNE)`, which overlaps CPU-side data preparation with GPU-side compute. This replaces the raw Python generator approach and provides better GPU utilization.
+
+### Reducing Training Time
+
+For large datasets, use `--limit` to cap the number of positive pairs:
+
+```bash
+# Train on 100K positive pairs instead of all (~1.5M)
+python train.py --config config.yaml --limit 100000 --epochs 5 --patience 3
+```
+
+Use `--steps-per-epoch` to cover a subset of the training data each epoch:
+
+```bash
+# 10,000 batches/epoch × 64 batch size = 640K samples/epoch
+python train.py --config config.yaml --steps-per-epoch 10000 --epochs 10
+```
+
+### Data Loading
+
+Parallel sequence fetching uses 16 threads (configurable via `_MAX_FETCH_WORKERS` in `pbi_adapter.py`). The LRU cache ensures each unique host genome is encoded only once per run.
+
+### Recommended Quick-Start Command
+
+```bash
+python train.py --config config.yaml \
+    --limit 100000 \
+    --batch-size 64 \
+    --epochs 5 \
+    --patience 3
+```
+
 ## Troubleshooting
 
-**cuDNN on Pascal GPUs (GTX 1080 Ti):** cuDNN 9.x dropped Pascal (sm_6.1) support. The Docker image pins TF 2.15 + cuDNN 8.9.x. Rebuild with `docker compose build --no-cache analysis`.
+**cuDNN on Pascal GPUs (GTX 1080 Ti):** cuDNN 9.x dropped Pascal (sm_6.1) support. The Docker image pins TF 2.15 + cuDNN 8.9.x. Rebuild with `docker compose build --no-cache analysis`. If XLA or cuDNN autotuning causes errors, they will automatically fall back to disabled mode.
 
-**Out of memory:** Reduce `--batch-size` (try 2), reduce thresholds, or use `--limit` on a subset.
+**Out of memory:** Reduce `--batch-size` (try 32 or 16), reduce thresholds, or use `--limit` on a subset.
 
-**Slow training:** Check `nvidia-smi` on host. Verify GPU detected in logs (`GPU detected: 1 device(s)`). The host cache (~5.6GB) ensures each unique host is encoded once.
+**Slow training:** Check `nvidia-smi` on host. Verify GPU detected in logs (`GPU detected: 1 device(s)`) and that XLA JIT and cuDNN autotuning are enabled. The host cache (~5.6GB) ensures each unique host is encoded once. Consider using `--limit` and `--steps-per-epoch` to reduce per-epoch time.

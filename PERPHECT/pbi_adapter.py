@@ -20,6 +20,7 @@ Usage:
     gen = adapter.create_tf_generator(couples, labels, batch_size=16)
 """
 
+import functools
 import hashlib
 import math
 import os
@@ -48,7 +49,7 @@ PHAGE_MIN_LENGTH = 1_500
 NEGATIVE_INTERACTIONS = {"no interaction", "none", "negative", "non-interacting"}
 
 # Max workers for parallel sequence fetching (I/O-bound, so more is fine)
-_MAX_FETCH_WORKERS = 8
+_MAX_FETCH_WORKERS = 16
 
 
 def _encode_seq_hash(seq: str, max_length: int) -> str:
@@ -600,6 +601,49 @@ class PBIAdapter:
                 targets[j] = labels[idx]
 
             yield (bacterium_samples, phage_samples), targets
+
+    def create_tf_dataset(
+        self,
+        couples: np.ndarray,
+        labels: np.ndarray,
+        batch_size: int = 64,
+        shuffle: bool = True,
+    ):
+        """
+        Create a tf.data.Dataset wrapping the generator with prefetching.
+
+        Uses tf.data.Dataset.from_generator() to wrap the existing generator
+        and adds .prefetch(tf.data.AUTOTUNE) to overlap data loading with
+        GPU compute. This provides a significant speedup over calling the
+        generator directly in model.fit().
+
+        Args:
+            couples: numpy array of shape (N, 2) with integer IDs.
+            labels: numpy array of shape (N,) with interaction labels.
+            batch_size: Number of samples per batch.
+            shuffle: Whether to randomly sample within each epoch.
+
+        Returns:
+            tf.data.Dataset yielding ([bacterium_batch, phage_batch], targets).
+        """
+        import tensorflow as tf
+
+        gen_fn = functools.partial(
+            self.create_tf_generator,
+            couples, labels,
+            batch_size=batch_size, shuffle=shuffle,
+        )
+
+        output_sig = (
+            (
+                tf.TensorSpec(shape=(batch_size, self.bacterium_threshold, 4), dtype=tf.uint8),
+                tf.TensorSpec(shape=(batch_size, self.phage_threshold, 4), dtype=tf.uint8),
+            ),
+            tf.TensorSpec(shape=(batch_size,), dtype=tf.float32),
+        )
+
+        dataset = tf.data.Dataset.from_generator(gen_fn, output_signature=output_sig)
+        return dataset.prefetch(tf.data.AUTOTUNE)
 
     # ------------------------------------------------------------------
     # Helper: prepare training data from PBI-Scope
