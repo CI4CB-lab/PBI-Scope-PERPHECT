@@ -27,8 +27,10 @@ RUN apt-get update && apt-get install -y \
 # Copy entire project to get workflow scripts and all dependencies
 COPY . /app/
 
-# Set PYTHONPATH to include /app for proper module imports
-ENV PYTHONPATH=/app:$PYTHONPATH
+# Set PYTHONPATH to include /app for proper module imports.
+# (No $PYTHONPATH reference: the base image defines none, and
+# docker-compose.yml sets PYTHONPATH=/app at runtime anyway.)
+ENV PYTHONPATH=/app
 
 # Install PBI package with analysis extras
 RUN pip install --no-cache-dir --trusted-host pypi.org --trusted-host files.pythonhosted.org -e /app/

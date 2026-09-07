@@ -46,7 +46,10 @@ Thumbs.db
 
 # Data directories (these should be in volumes)
 data/
-private_data/
+# NB: to re-include a subdirectory, exclude the parent's *contents*, not the
+# directory itself — Docker never descends into an excluded directory, so child
+# exceptions below a bare `private_data/` line would silently match nothing.
+private_data/*
 !private_data/test_private/
 !private_data/test_private/**
 .snakemake/
