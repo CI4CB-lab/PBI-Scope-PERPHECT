@@ -554,7 +554,7 @@ class PBIAdapter:
             phage_samples = np.zeros(
                 (len(indices), self.phage_threshold, 4), dtype=np.uint8
             )
-            targets = np.zeros((len(indices),))
+            targets = np.zeros((len(indices),), dtype=np.float32)
 
             for j, idx in enumerate(indices):
                 host_id_int = couples[idx, 0]
@@ -625,6 +625,11 @@ class PBIAdapter:
 
         Returns:
             tf.data.Dataset yielding ([bacterium_batch, phage_batch], targets).
+
+        Note: the batch dimension is None (variable) because the final batch
+        of a non-shuffled pass is short when the dataset size is not
+        divisible by batch_size (e.g. 60 instead of 64). Keras handles
+        variable batch sizes natively.
         """
         import tensorflow as tf
 
@@ -636,10 +641,10 @@ class PBIAdapter:
 
         output_sig = (
             (
-                tf.TensorSpec(shape=(batch_size, self.bacterium_threshold, 4), dtype=tf.uint8),
-                tf.TensorSpec(shape=(batch_size, self.phage_threshold, 4), dtype=tf.uint8),
+                tf.TensorSpec(shape=(None, self.bacterium_threshold, 4), dtype=tf.uint8),
+                tf.TensorSpec(shape=(None, self.phage_threshold, 4), dtype=tf.uint8),
             ),
-            tf.TensorSpec(shape=(batch_size,), dtype=tf.float32),
+            tf.TensorSpec(shape=(None,), dtype=tf.float32),
         )
 
         dataset = tf.data.Dataset.from_generator(gen_fn, output_signature=output_sig)

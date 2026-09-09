@@ -255,6 +255,75 @@ class TestPBIAdapterGenerator:
         assert batch_inputs[1].shape == (2, 10, 4)  # phage
         assert batch_targets.shape == (2,)
 
+    def test_generator_partial_final_batch(self):
+        """Non-shuffled generator yields a short final batch, then cycles.
+
+        Regression test: tf.data.from_generator requires the declared
+        output signature to accept variable batch sizes, otherwise the
+        short final batch (e.g. 60 instead of 64) raises TypeError.
+        """
+        from pbi_adapter import PBIAdapter
+
+        retriever = _make_retriever()
+        adapter = PBIAdapter(
+            retriever,
+            bacterium_threshold=20,
+            phage_threshold=10,
+            bacterium_min_length=10,
+            phage_min_length=10,
+        )
+
+        for i in range(5):
+            adapter._map_host_id(f"host_{i}")
+            adapter._map_phage_id(f"phage_{i}")
+        adapter._host_sequences = {f"host_{i}": "ATCG" * 5 for i in range(5)}
+        adapter._phage_sequences = {f"phage_{i}": "AAAA" * 5 for i in range(5)}
+
+        couples = np.array([[i, i] for i in range(5)])
+        labels = np.array([1.0, 0.0, 1.0, 0.0, 1.0])
+
+        gen = adapter.create_tf_generator(couples, labels, batch_size=2, shuffle=False)
+
+        (bact1, _), _ = next(gen)
+        assert bact1.shape[0] == 2
+        (bact2, _), _ = next(gen)
+        assert bact2.shape[0] == 2
+        # Final batch is short (5 % 2 == 1)
+        (bact3, phage3), targets3 = next(gen)
+        assert bact3.shape == (1, 20, 4)
+        assert phage3.shape == (1, 10, 4)
+        assert targets3.shape == (1,)
+        assert targets3[0] == labels[4]
+        # Generator cycles back to the start
+        (bact4, _), _ = next(gen)
+        assert bact4.shape[0] == 2
+
+    def test_generator_targets_float32(self):
+        """Targets must be float32 to match the tf.data output signature."""
+        from pbi_adapter import PBIAdapter
+
+        retriever = _make_retriever()
+        adapter = PBIAdapter(
+            retriever,
+            bacterium_threshold=20,
+            phage_threshold=10,
+            bacterium_min_length=10,
+            phage_min_length=10,
+        )
+
+        adapter._map_host_id("host_0")
+        adapter._map_phage_id("phage_0")
+        adapter._host_sequences = {"host_0": "ATCG" * 5}
+        adapter._phage_sequences = {"phage_0": "AAAA" * 5}
+
+        couples = np.array([[0, 0], [0, 0]])
+        labels = np.array([1.0, 0.0])
+
+        gen = adapter.create_tf_generator(couples, labels, batch_size=2, shuffle=False)
+        _, batch_targets = next(gen)
+
+        assert batch_targets.dtype == np.float32
+
 
 # ---------------------------------------------------------------------------
 # Prepare Training Data Tests
