@@ -1,6 +1,6 @@
 # Welcome to PBI-Scope Documentation
 
-**PBI-Scope — Phage Bacteria Interactions (v0.4.0)**
+**PBI-Scope — Phage Bacteria Interactions (v0.6.0)**
 
 ## What is PBI-Scope?
 
@@ -8,17 +8,17 @@ PBI-Scope is a reproducible Docker-first pipeline that prepares phage-host data 
 
 It combines:
 
-1. **Public phage data** from [PhageScope](https://phagescope.deepomics.org/) (which itself aggregates multiple phage sources). It includes Genomes, Proteins and large variety of metadata. 
+1. **Public phage data** from [PhageScope](https://phagescope.deepomics.org/) (which itself aggregates multiple phage sources): genomes, proteins, GFF3 annotations, and a large variety of metadata.
 2. **Optional private datasets** fully local in `private_data/`
 3. **Host genome resolution/download** from NCBI RefSeq
-4. **BLAST** database build for Nucleotide and Protein
+4. **BLAST database build** for sequence similarity search (phages, proteins, hosts, private, combined)
 
 Outputs are stored in a shared data volume and made available through the `pbi` Python package or the REST API.
 
 !!! info "Database overview and data sample available here: "
     For a quick visual overview of all PhageScope tables and data quality, see the [Database Validation Report](https://thibaultschowing.github.io/PBI-Scope/reports/database_validation.html) and [Phage Metadata Report](https://thibaultschowing.github.io/PBI-Scope/reports/phage_metadata_report.html).
 
-> PBI-Scope is **not PhageScope-only** anymore. Private source ingestion is part of the standard workflow when source folders are present and csv completed !
+> PBI-Scope is **not PhageScope-only** anymore. Private source ingestion is part of the standard workflow when source folders are present and their CSV files are complete!
 
 ## Start Here
 
@@ -34,7 +34,7 @@ Outputs are stored in a shared data volume and made available through the `pbi` 
 
 - **[Private Data Ingestion](guides/private-data-ingestion.md)**
 
-  Required files, validation rules, and mandatory host sequence requirements.
+  Required files, validation rules, and host sequence options.
 
 - **[Analysis Container Usage](guides/analysis-guide.md)**
 
@@ -89,22 +89,9 @@ refseq = client.get_phage_metadata(
 print(refseq.head())
 ```
 
-### Quick debug: inspect the data volume
-
-You can inspect the raw pipeline outputs (database, sequences, GFF3 files) by running a temporary container with the data volume mounted:
-
-```bash
-docker run --rm -it -v pbi-scope_pbi-data:/data alpine sh
-ls /data/processed/
-# databases/  gff3/  sequences/
-```
-
-!!! note "Volume name"
-    The volume is named `pbi-scope_pbi-data` (project directory + underscore + volume name). Adjust if your project directory name differs.
-
 ### Notebooks
 
-Explore the [example notebooks](https://github.com/ThibaultSchowing/PBI/tree/main/notebooks) for detailed workflows:
+Explore the [example notebooks](https://github.com/ThibaultSchowing/PBI-Scope/tree/main/notebooks) for detailed workflows:
 
 | Notebook | Description |
 |----------|-------------|
@@ -117,6 +104,7 @@ Explore the [example notebooks](https://github.com/ThibaultSchowing/PBI/tree/mai
 | `06_reproducibility.ipynb` | Reproducibility and provenance tracking |
 | `07_gff3_annotations.ipynb` | GFF3 gene annotation retrieval and analysis |
 | `08_api_client.ipynb` | Using the REST API client |
+| `09_blast_search.ipynb` | BLAST sequence similarity search |
 
 ## Pipeline overview
 
@@ -143,6 +131,12 @@ Explore the [example notebooks](https://github.com/ThibaultSchowing/PBI/tree/mai
                                    | reports + logs         |
                                    +-----------+-----------+
                                                |
+                                   +-----------v-----------+
+                                   | Stage 5: BLAST DBs    |
+                                   | phages + proteins     |
+                                   | host/private/combined |
+                                   +-----------+-----------+
+                                               |
                      +-------------------------+-------------------------+
                      |                                                   |
            +---------v---------+                               +---------v---------+
@@ -159,9 +153,10 @@ Explore the [example notebooks](https://github.com/ThibaultSchowing/PBI/tree/mai
 | Public data integration | ✅ Stable | Public phage content from PhageScope |
 | Private data handling | ✅ Stable | Dedicated ingestion/validation path; see [Private Data Ingestion](guides/private-data-ingestion.md) |
 | Host genome resolution | ✅ Stable | Multi-token host parsing + NCBI assembly resolution |
+| BLAST databases | ✅ Stable | Five pre-built databases (phages, proteins, hosts, private, combined); see notebook `09_blast_search.ipynb` |
 | Analysis workflow | ✅ Stable | Analysis container is the main interface |
-| REST API | ✅ Supported | Metadata queries, sequence retrieval, GFF3 annotations, SQL exploration; see [API Reference](api/overview.md) |
-| Documentation | 🔄 Updated for v0.4.0 | Structure simplified and aligned with current infrastructure |
+| REST API | ✅ Supported | Metadata queries, sequence retrieval, GFF3 annotations, BLAST search, SQL exploration; see [API Reference](api/overview.md) |
+| Documentation | 🔄 Updated for v0.6.0 | Structure simplified and aligned with current infrastructure |
 
 ## Work in Progress
 
@@ -170,8 +165,21 @@ Explore the [example notebooks](https://github.com/ThibaultSchowing/PBI/tree/mai
 
     We are in communication with the DeepHost authors to address this issue and improve host assignment quality in future releases.
 
+## Reference Pages
+
+New to the project? Start with the [Guides overview](guides/overview.md) above. When you need details, these reference pages document each part of the system:
+
+| Reference Page | Description |
+|----------------|-------------|
+| [Commands](reference/commands.md) | Docker, pipeline, database, and API command reference |
+| [API Reference](api/overview.md) | REST API endpoints, parameters, and usage examples |
+| [Database](database/overview.md) | Schema structure, statistics, and data sources |
+| [Host Resolution](database/host-resolution.md) | How host genomes are resolved from NCBI |
+| [Code Structure](developer/code-structure.md) | Repository layout and developer guide |
+| [CI Tests](developer/ci-tests.md) | Continuous integration and test suite |
+
 ## Need help?
 
 - Use the [Guides overview](guides/overview.md)
 - Read [How it works](guides/how-it-works.md)
-- Open issues on [GitHub](https://github.com/ThibaultSchowing/PBI/issues)
+- Open issues on [GitHub](https://github.com/ThibaultSchowing/PBI-Scope/issues)

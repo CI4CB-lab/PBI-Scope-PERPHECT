@@ -1,21 +1,18 @@
 # Private Data Ingestion
 
-> **⚠️ Important:** After adding, removing, or modifying private data sources, you **must** delete the manifest file to force the pipeline to re-scan your data:
->
-> ```bash
-> docker exec <container_name> rm /private-data/private_manifest.json
-> ```
->
-> Without this step, the pipeline will reuse the cached manifest and your changes will be ignored.
->
-> **ℹ️ Included example:** the repository ships a tiny synthetic dataset under
-> `private_data/test_private/` (`metadata.csv`, `phage.fasta`, `hosts/`) so the
-> notebooks can demonstrate private-data ingestion end to end. Before running the
-> pipeline on real data, either delete `private_data/test_private/` or exclude it
-> explicitly in your queries (e.g. `WHERE Source_DB != 'test_private'`),
-> otherwise the synthetic phages/hosts will be ingested alongside real data.
-
 PBI-Scope can ingest private sources from `private_data/` in addition to public PhageScope data.
+
+!!! danger "Example data is ingested — remove it before running"
+    The repository ships a tiny synthetic dataset under `private_data/test_private/` (`metadata.csv`, `phage.fasta`, `hosts/`) so the notebooks can demonstrate private-data ingestion end to end. Observe its structure to model your own sources, then **rename the folder, empty it, or delete it before running the pipeline** — otherwise the synthetic phages/hosts WILL be ingested alongside your real data. (Alternatively, exclude it explicitly in your queries, e.g. `WHERE Source_DB != 'test_private'`.)
+
+!!! warning "Delete the manifest after changing private data"
+    After adding, removing, or modifying private data sources, you **must** delete the manifest file to force the pipeline to re-scan your data:
+
+    ```bash
+    docker exec <container_name> rm /private-data/private_manifest.json
+    ```
+
+    Without this step, the pipeline will reuse the cached manifest and your changes will be ignored.
 
 ## Directory structure
 

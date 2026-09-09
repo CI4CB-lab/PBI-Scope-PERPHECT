@@ -171,7 +171,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="PBI Database API",
     description="API for querying the Phage Bacteria Interactions database",
-    version="0.4.0",
+    version="0.6.0",
     lifespan=lifespan
 )
 
@@ -210,7 +210,7 @@ async def root():
     """Root endpoint with API information."""
     return {
         "name": "PBI Database API",
-        "version": "0.4.0",
+        "version": "0.6.0",
         "status": "running",
         "endpoints": {
             "health": "/health",
