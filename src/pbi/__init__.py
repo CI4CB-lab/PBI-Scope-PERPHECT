@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from .negative_examples import NegativeExampleGenerator
     from .sequence_retrieval import SequenceRetriever
     from .gff3_retrieval import GFF3Retriever
+    from .blast_search import BlastSearcher
     from .api_client import APIClient
     from .streaming_dataset import (
         PhageHostIndexedDataset,
@@ -21,13 +22,14 @@ if TYPE_CHECKING:
     )
 
 # Package metadata
-__version__ = "0.4.0"
+__version__ = "0.6.0"
 __author__ = "Thibault Schowing, CI4CB"
 
 # Public exports used by `from pbi import *`
 __all__ = [
     'SequenceRetriever',
     'GFF3Retriever',
+    'BlastSearcher',
     'APIClient',
     'NegativeExampleGenerator',
     'PhageHostStreamingDataset',
@@ -50,6 +52,9 @@ def __getattr__(name):
     if name == "NegativeExampleGenerator":
         from .negative_examples import NegativeExampleGenerator
         return NegativeExampleGenerator
+    if name == "BlastSearcher":
+        from .blast_search import BlastSearcher
+        return BlastSearcher
     if name in {"PhageHostStreamingDataset", "PhageHostIndexedDataset", "phage_host_collate_fn"}:
         from .streaming_dataset import (
             PhageHostIndexedDataset,

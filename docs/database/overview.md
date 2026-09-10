@@ -21,6 +21,8 @@ PBI-Scope stores metadata and sequence assets in complementary layers.
 
 - **DuckDB**: phage-centric star schema for analytical metadata queries
 - **Indexed FASTA files**: phage/protein sequences and host genomes
+- **GFF3 annotations**: phage gene annotations with index
+- **BLAST databases** (`blast_db/`): pre-built `phages`, `proteins`, `hosts`, `private`, and `combined` databases for sequence similarity search
 - **Link/mapping files**: host and private-source resolution paths
 
 ## Schema (DuckDB)

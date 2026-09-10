@@ -113,10 +113,10 @@ If you do not have SSH access to push files directly, use `scp` or `rsync`:
 
 ```bash
 # Copy a local notebook to the server's notebooks directory
-scp my_analysis.ipynb user@your-server:/path/to/PBI/notebooks/
+scp my_analysis.ipynb user@your-server:/path/to/PBI-Scope/notebooks/
 
 # Sync the entire local notebooks folder to the server
-rsync -avz ./notebooks/ user@your-server:/path/to/PBI/notebooks/
+rsync -avz ./notebooks/ user@your-server:/path/to/PBI-Scope/notebooks/
 ```
 
 ---
@@ -166,6 +166,7 @@ print(stats['database'])
 - `02_sequence_retrieval.ipynb`
 - `03_ml_streaming.ipynb`
 - `08_api_client.ipynb`
+- `09_blast_search.ipynb`
 
 ---
 
@@ -178,7 +179,7 @@ You can run the pipeline locally without Docker. This requires managing conda en
 conda env create -f workflow/envs/base_environment.yaml
 conda activate pbi-env
 
-# Install PBI package
+# Install the `pbi` package
 pip install -e .
 
 # 2. Configure NCBI credentials
@@ -191,7 +192,7 @@ snakemake --directory workflow --snakefile workflow/Snakefile \
   --cores 4 --use-conda --printshellcmds
 ```
 
-**Note**: The first run downloads ~50 GB of phage data and then attempts to download ~5,500 bacterial host genomes. Total runtime is similar to Docker (~4h for phages, ~12–18h for hosts).
+**Note**: The first run downloads ~50 GB of phage data and then attempts to download ~5,500 bacterial host genomes. Total runtime is similar to Docker (~4h for phages, ~12–18h for hosts, plus additional time for file merging and BLAST database building).
 
 ---
 

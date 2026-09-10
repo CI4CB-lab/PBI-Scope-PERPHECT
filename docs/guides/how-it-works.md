@@ -19,7 +19,7 @@ This keeps current `*_urls` maps intact while adding a provider/version foundati
 
 ## Data provenance
 
-During each public file download, PBI writes a sidecar record with:
+During each public file download, PBI-Scope writes a sidecar record with:
 
 - source URL and local path
 - retrieval timestamp, file size
@@ -50,9 +50,14 @@ workflow/Snakefile
    +-- database.smk    -> merge metadata + build/optimize DuckDB
    +-- sequences.smk   -> build/index phage & protein FASTA
    +-- hosts.smk       -> parse host fields, resolve assemblies, download host FASTA
+   +-- gff3.smk        -> download/index phage GFF3 annotations
+   +-- blast.smk       -> build BLAST databases (phages, proteins, hosts, private, combined)
 ```
 
 When private source folders are present, validation and private mapping preparation run automatically before final outputs are finalized.
+
+!!! warning "First run is slow — this is expected"
+    Downloading, host resolution, file merging, and BLAST database building are **time-consuming tasks** on the first execution (often 10+ hours). The pipeline may seem stalled — in particular, the `makeblastdb` / BLAST database building step is just long — but it is processing large genomic files. Monitor progress via the Snakemake logs. Subsequent runs reuse cached data and complete significantly faster.
 
 ## Main outputs
 
@@ -61,6 +66,8 @@ When private source folders are present, validation and private mapping preparat
 - `all_proteins.fasta(.fai)`
 - `host_fasta_mapping.json`
 - `private_phage_mapping.json` (if private sources exist)
+- GFF3 annotations + index (`gff3/`, `gff3_index.json`)
+- `blast_db/` — BLAST databases (phages, proteins, hosts, private, combined)
 - `public_data_manifest.json/.csv` (public-source provenance)
 - `pipeline_run_provenance.json/.csv` (run-level provider pinning)
 - reports and logs

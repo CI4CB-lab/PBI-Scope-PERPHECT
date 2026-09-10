@@ -28,6 +28,8 @@ outputs/*
 !outputs/.keep
 !outputs/export/
 !outputs/export/.gitkeep
+!outputs/09_blast_search/
+!outputs/09_blast_search/.gitkeep
 .ipynb_checkpoints
 */.ipynb_checkpoints/*
 notebooks/exports/
@@ -62,7 +64,6 @@ dist/
 .ropeproject
 .test*
 tests/test*/*
-PERPHECT/test_data/
 playground/*
 tutorial/*
 

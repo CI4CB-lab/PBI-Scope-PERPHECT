@@ -3,7 +3,7 @@
 This guide explains how to create your own Docker container connected to the PBI-Scope database. You can use any language (R, Python, Julia, Rust, etc.) and any workflow (Jupyter, scripts, both).
 
 !!! info "Source Files"
-    All example files are in the [`mount_scripts/`](https://github.com/ThibaultSchowing/PBI/tree/main/mount_scripts) directory at the repository root. The Dockerfile and scripts contain extensive comments explaining each section.
+    All example files are in the [`mount_scripts/`](https://github.com/ThibaultSchowing/PBI-Scope/tree/main/mount_scripts) directory at the repository root. The Dockerfile and scripts contain extensive comments explaining each section.
 
 ---
 
@@ -44,7 +44,7 @@ volumes:
 
 ## Quick Start: R + Python Container
 
-The [`mount_scripts/`](https://github.com/ThibaultSchowing/PBI/tree/main/mount_scripts) directory contains a complete working example.
+The [`mount_scripts/`](https://github.com/ThibaultSchowing/PBI-Scope/tree/main/mount_scripts) directory contains a complete working example.
 
 ### Step 1: Build the Container
 
@@ -592,7 +592,7 @@ R -e 'IRkernel::installspec(user = FALSE)'
 
 ## Example: Complete R + Python Workflow
 
-The [`mount_scripts/`](https://github.com/ThibaultSchowing/PBI/tree/main/mount_scripts) directory contains a complete working example:
+The [`mount_scripts/`](https://github.com/ThibaultSchowing/PBI-Scope/tree/main/mount_scripts) directory contains a complete working example:
 
 | File | Description |
 |------|-------------|
@@ -630,6 +630,6 @@ ls output/
 ## See Also
 
 - [Analysis Container Guide](analysis-guide.md) — The default PBI-Scope container
-- [PBI Package Reference](pbi-package.md) — Python API for data access
+- [`pbi` Package Reference](pbi-package.md) — Python API for data access
 - [Docker Guide](docker-guide.md) — Docker Compose setup and configuration
 - [API Reference](../api/overview.md) — REST API for metadata queries

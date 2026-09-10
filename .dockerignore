@@ -2,6 +2,10 @@
 .git
 .gitignore
 
+# mount_scripts/ is NOT used in main docker-compose.yml
+# It's a separate custom container (docker-compose.custom.yml)
+mount_scripts/
+
 # Python cache
 __pycache__/
 *.py[cod]
@@ -42,16 +46,30 @@ Thumbs.db
 
 # Data directories (these should be in volumes)
 data/
+# NB: to re-include a subdirectory, exclude the parent's *contents*, not the
+# directory itself — Docker never descends into an excluded directory, so child
+# exceptions below a bare `private_data/` line would silently match nothing.
+private_data/*
+!private_data/test_private/
+!private_data/test_private/**
 .snakemake/
+
+# Documentation and graphics (not needed in any container)
+docs/
+graphics/
+site/
+mkdocs.yml
+
+# Generated outputs and logs (mounted at runtime)
+outputs/
+pipeline_logs/
+
+# CI/CD
+.github/
 
 # Notebooks
 notebooks/
 *.ipynb
-
-# Documentation build
-docs/_build/
-mkdocs/
-site/
 
 # Tests
 tests/
