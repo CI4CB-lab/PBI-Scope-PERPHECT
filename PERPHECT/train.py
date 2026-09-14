@@ -593,21 +593,24 @@ def main():
     
     with _Timer("Query pair IDs from DB"):
         if is_finetuning:
-            # FINE-TUNING MODE: Only use the excluded sources
-            if not exclude_sources:
-                raise ValueError("--exclude-sources is required for fine-tuning mode")
-            
-            # Query ONLY the specified sources for fine-tuning
-            placeholders = ", ".join(["?" for _ in exclude_sources])
-            query = f"""
-            SELECT DISTINCT pha.Phage_ID, pha.Host_ID
-            FROM phage_host_associations pha
-            JOIN fact_phages p ON pha.Phage_ID = p.Phage_ID
-            WHERE p.Source_DB IN ({placeholders})
-            """
-            query += " ORDER BY MD5(pha.Phage_ID || pha.Host_ID)"
-            all_pairs = retriever.conn.execute(query, exclude_sources).fetchdf()
-            logging.info(f"Fine-tuning mode: Found {len(all_pairs)} pairs from sources {exclude_sources}")
+            # FINE-TUNING MODE: train on the specified sources, or all
+            # sources when --exclude-sources is empty/absent.
+            if exclude_sources:
+                # Query ONLY the specified sources for fine-tuning
+                placeholders = ", ".join(["?" for _ in exclude_sources])
+                query = f"""
+                SELECT DISTINCT pha.Phage_ID, pha.Host_ID
+                FROM phage_host_associations pha
+                JOIN fact_phages p ON pha.Phage_ID = p.Phage_ID
+                WHERE p.Source_DB IN ({placeholders})
+                """
+                query += " ORDER BY MD5(pha.Phage_ID || pha.Host_ID)"
+                all_pairs = retriever.conn.execute(query, exclude_sources).fetchdf()
+                logging.info(f"Fine-tuning mode: Found {len(all_pairs)} pairs from sources {exclude_sources}")
+            else:
+                logging.info("Fine-tuning mode: no source filter, using ALL sources")
+                all_pairs = adapter.get_pair_ids_only(shuffle=True, exclude_sources=None)
+                logging.info(f"Fine-tuning mode: Found {len(all_pairs)} pairs in database (all sources)")
         else:
             # PRE-TRAINING MODE: Exclude specified sources
             all_pairs = adapter.get_pair_ids_only(shuffle=True, exclude_sources=exclude_sources)

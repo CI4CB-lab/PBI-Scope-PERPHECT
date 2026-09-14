@@ -69,3 +69,21 @@ profiles:
       exclude_ids: "test_data/excluded_pairs.csv"
       exclude_sources:
         - "PERPHECT_private"
+
+  # Fine-tuning on ALL sources (no source filter).
+  # Same as finetune but trains on every Source_DB. Requires
+  # --pretrained-model on CLI. exclude_ids is kept so the held-out
+  # test set from 01_prepare_test_set.ipynb stays uncontaminated.
+  finetune_all:
+    training:
+      epochs: 5
+      batch_size: 16
+      patience: 3
+      cross_validate: 0         # CV not supported with fine-tuning
+      fine_tune_lr: 0.0001
+      fine_tune_epochs: 5
+      freeze_base: true
+      freeze_up_to: "concatenated_features"
+      finetuned_model_name: "model_finetuned_best.keras"
+    data:
+      exclude_ids: "test_data/excluded_pairs.csv"
