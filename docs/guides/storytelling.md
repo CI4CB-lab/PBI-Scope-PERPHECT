@@ -30,6 +30,10 @@ Named volumes and bind mounts keep outputs persistent and auditable.
 8. **Download host FASTAs** from NCBI RefSeq
 9. **Create DuckDB database** and optimize analytical access
 10. **Store reports and logs** (validation, quality, failure logs)
+11. **Build BLAST databases** (phages, proteins, hosts, private, combined)
+
+!!! warning "Expect long runtime on first execution"
+    Steps 1–3, 7, 8, and 11 (downloading, file merging, host resolution, host download, and BLAST database building) are **time-consuming** on first run. The pipeline may appear stalled — especially during BLAST database building, which is just long — but it is performing I/O-heavy operations on large genomic datasets. These tasks typically take 10+ hours on first execution.
 
 ## 4) Resulting data product
 
@@ -39,6 +43,8 @@ After completion, PBI-Scope provides:
 - Indexed phage/protein FASTA files
 - Host FASTA mapping for host retrieval
 - Private phage mapping when private sources are present
+- GFF3 gene annotations with index
+- BLAST databases for sequence similarity searches (phages, proteins, hosts, private, combined)
 - Pipeline logs and reports for traceability
 
 ## 5) How users work with it
@@ -57,7 +63,7 @@ The recommended interface is the analysis container with the `pbi` package.
 - [API Reference](../api/overview.md)
 - [Remote Access (API)](../api/overview.md#remote-access)
 - [Private data ingestion](private-data-ingestion.md)
-- [Notebooks README](https://github.com/ThibaultSchowing/PBI/blob/main/notebooks/README.md)
+- [Notebooks README](https://github.com/ThibaultSchowing/PBI-Scope/blob/main/notebooks/README.md)
 
 ## 7) Build your own environment
 
@@ -70,4 +76,4 @@ A custom container connects to the same data volume as the default one, so it ha
 - **Use a different language** like Julia, Rust, or anything else that can read DuckDB or FASTA files
 - **Share the database** across multiple containers via the REST API, without loading data locally
 
-The [Building Custom Containers](custom-containers.md) guide walks you through this step by step, with a ready-to-use R + Python example in the [`mount_scripts/`](https://github.com/ThibaultSchowing/PBI/tree/main/mount_scripts) directory.
+The [Building Custom Containers](custom-containers.md) guide walks you through this step by step, with a ready-to-use R + Python example in the [`mount_scripts/`](https://github.com/ThibaultSchowing/PBI-Scope/tree/main/mount_scripts) directory.

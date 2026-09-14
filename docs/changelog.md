@@ -4,6 +4,26 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-09
+
+### Added
+
+- BLAST capacity: the pipeline now builds five BLAST databases (`phages`, `proteins`, `hosts`, `private`, `combined`) via `workflow/rules/blast.smk`, with private-vs-public duplicate detection.
+- `BlastSearcher` class in the `pbi` package, `pbi blast-search` / `pbi blast-diagnose` CLI commands, and REST API endpoints (`POST /blast/search`, `GET /blast/databases`, `GET /blast/status`).
+- `09_blast_search.ipynb` notebook demonstrating sequence similarity search.
+- Restored `private_data/test_private/` synthetic example dataset so notebooks can demonstrate private-data ingestion end to end.
+
+### Changed
+
+- Documentation refreshed for v0.6.0: BLAST pipeline stage and outputs, first-run timing warnings (downloading, host resolution, file merging, BLAST database building), PBI-Scope naming consistency, and reference-page index.
+
+## [0.5.0] - 2026-08-24
+
+### Added
+
+- GFF3 gene annotation retrieval: `GFF3Retriever` class, API endpoints, and `07_gff3_annotations.ipynb` notebook.
+- Continuous integration pipeline with automated pipeline and `pbi` package tests (see [CI Tests](developer/ci-tests.md)).
+
 ## [0.4.0] - 2026-07-20
 
 ### Added

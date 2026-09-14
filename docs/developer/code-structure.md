@@ -184,7 +184,7 @@ python -m pytest tests/
 
 ## Schema Contracts
 
-PBI uses YAML-based schema contracts to keep metadata preprocessing resilient to upstream changes. Each contract (`workflow/schemas/*.yaml`) declares required/optional columns, aliases, and defaults.
+PBI-Scope uses YAML-based schema contracts to keep metadata preprocessing resilient to upstream changes. Each contract (`workflow/schemas/*.yaml`) declares required/optional columns, aliases, and defaults.
 
 ### Contract sections
 

@@ -349,6 +349,18 @@ pbi validate-private
 # Or point to an explicit root
 pbi validate-private --path /path/to/private_root
 
+# List available BLAST databases and their build status
+pbi blast-search --list-databases
+
+# Search a sequence against a BLAST database
+pbi blast-search "ATGCGTTTACG..." --program blastn --db phages --max-hits 10
+
+# Search from a FASTA file, save hits to CSV
+pbi blast-search --input query.fasta --program blastp --db proteins --output hits.csv
+
+# Diagnose BLAST installation and databases (with a test search)
+pbi blast-diagnose --test-search
+
 # Uninstall
 pip uninstall pbi
 ```
@@ -585,7 +597,7 @@ python -m pstats output.prof
 ```bash
 # 1. Clone repository
 git clone https://github.com/ThibaultSchowing/PBI-Scope.git
-cd PBI
+cd PBI-Scope
 
 # 2. Create conda environment
 conda create -n pbi python=3.10

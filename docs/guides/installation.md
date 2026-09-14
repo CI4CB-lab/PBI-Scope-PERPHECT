@@ -12,8 +12,8 @@ PBI-Scope is designed to run with Docker.
 ## 1) Clone and configure
 
 ```bash
-git clone https://github.com/ThibaultSchowing/PBI.git
-cd PBI
+git clone https://github.com/ThibaultSchowing/PBI-Scope.git
+cd PBI-Scope
 
 # Copy the example env file and open it to fill in NCBI credentials:
 cp .env.example .env
@@ -40,12 +40,16 @@ docker compose build pipeline
 docker compose run --rm pipeline
 ```
 
+!!! warning "First run takes hours"
+    On the first execution, downloading public data, resolving/downloading host genomes, merging files, and building BLAST databases are **time-consuming operations** (often 10+ hours depending on data size and network). The pipeline is not stalled — it is processing large genomic files. Subsequent runs are much faster as they reuse cached data.
+
 Pipeline order:
 
 1. public phage download + merge
 2. private source validation/ingestion (if present)
 3. host resolution/download from NCBI
-4. database + indexes + reports
+4. database + indexes + GFF3 + reports
+5. BLAST database build (phages, proteins, hosts, private, combined)
 
 ## 3) Start analysis container
 
@@ -93,8 +97,16 @@ For large joins/sequence retrieval, use chunked queries and avoid loading very l
 
 ## Private data note
 
-If you use `private_data/` sources, each source must include host FASTA files (`hosts/<Host_ID>.fna`) matching metadata Host_ID values.
-See [Private Data Ingestion](private-data-ingestion.md).
+If you use `private_data/` sources, see [Private Data Ingestion](private-data-ingestion.md) for the required layout. Host FASTA files (`hosts/<Host_ID>.fna`) are only required when your metadata uses real `Host_ID` values — sources with `Host_ID`/`Host_name` set to `unknown` run in phage-only mode without a `hosts/` directory.
+
+!!! danger "Example data is ingested — remove it before running"
+    The repository ships a synthetic example dataset (`private_data/test_private/`). Use it to observe the expected folder structure, then **rename the folder, empty it, or delete it before running the pipeline** — anything left in `private_data/` WILL be ingested into your database.
+
+    ```bash
+    # Inspect the example structure, then remove it (keep the directory)
+    ls -la private_data/
+    rm -rf private_data/test_private
+    ```
 
 ---
 

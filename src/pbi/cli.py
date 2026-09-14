@@ -61,6 +61,174 @@ def _cmd_validate_private(args: argparse.Namespace) -> int:
     return 0 if summary["sources_invalid"] == 0 else 1
 
 
+# Default BLAST database path (container mode)
+_DEFAULT_BLAST_DB_DIR = "/data/processed/blast_db"
+
+
+def _cmd_blast_search(args: argparse.Namespace) -> int:
+    """Search a sequence against BLAST databases."""
+    from .blast_search import BlastSearcher
+
+    blast_db_dir = args.blast_db_dir or _DEFAULT_BLAST_DB_DIR
+
+    if not Path(blast_db_dir).exists():
+        print(f"BLAST database directory not found: {blast_db_dir}", file=sys.stderr)
+        print("Run the pipeline to build BLAST databases first.", file=sys.stderr)
+        return 1
+
+    try:
+        searcher = BlastSearcher(blast_db_dir)
+
+        # Check databases
+        if args.list_databases:
+            dbs = searcher.list_databases()
+            print("Available BLAST databases:")
+            for name, info in dbs.items():
+                status = "READY" if info["exists"] else "NOT BUILT"
+                size_gb = info.get("total_size_gb", 0)
+                print(f"  [{status}] {name} ({info['type']}) - {size_gb:.2f} GB")
+            return 0
+
+        # Validate inputs
+        if not args.sequence and not args.input:
+            print("Error: provide --sequence or --input", file=sys.stderr)
+            return 1
+
+        program = args.program
+        db = args.db
+        max_hits = args.max_hits
+        evalue = args.evalue
+        timeout = args.timeout
+        num_threads = args.num_threads
+
+        if args.input:
+            results = searcher.search_fasta(
+                args.input, program=program, db=db,
+                max_hits=max_hits, evalue=evalue,
+                timeout=timeout, num_threads=num_threads,
+            )
+        else:
+            results = searcher.search_sequence(
+                args.sequence, program=program, db=db,
+                max_hits=max_hits, evalue=evalue,
+                timeout=timeout, num_threads=num_threads,
+            )
+
+        if results.empty:
+            print("No hits found.")
+            return 0
+
+        # Output
+        if args.output:
+            results.to_csv(args.output, index=False)
+            print(f"Results written to {args.output} ({len(results)} hits)")
+        else:
+            print(results.to_string(index=False))
+
+        return 0
+
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+    except Exception as e:
+        print(f"Error running BLAST search: {e}", file=sys.stderr)
+        return 1
+
+
+def _cmd_blast_diagnose(args: argparse.Namespace) -> int:
+    """Diagnose BLAST database health and test searches."""
+    import time
+    from .blast_search import BlastSearcher
+
+    blast_db_dir = args.blast_db_dir or _DEFAULT_BLAST_DB_DIR
+
+    if not Path(blast_db_dir).exists():
+        print(f"BLAST database directory not found: {blast_db_dir}", file=sys.stderr)
+        print("Run the pipeline to build BLAST databases first.", file=sys.stderr)
+        return 1
+
+    try:
+        searcher = BlastSearcher(blast_db_dir)
+
+        print("BLAST Diagnostic Tool")
+        print("=" * 60)
+        print(f"BLAST binary: {searcher.blast_bin_dir}")
+        print(f"Database dir: {searcher.blast_db_dir}")
+
+        # List all databases with sizes
+        print(f"\nAll Databases:")
+        print("-" * 60)
+        dbs = searcher.list_databases()
+        for name, info in dbs.items():
+            status = "READY" if info["exists"] else "NOT BUILT"
+            size_mb = info.get("total_size_mb", 0)
+            size_gb = info.get("total_size_gb", 0)
+            if size_gb >= 1:
+                size_str = f"{size_gb:.2f} GB"
+            else:
+                size_str = f"{size_mb:.1f} MB"
+            print(f"  [{status}] {name} ({info['type']}) - {size_str}")
+
+        # Diagnose specific database(s)
+        if args.db:
+            dbs_to_check = [args.db]
+        else:
+            dbs_to_check = [name for name, info in dbs.items() if info["exists"]]
+
+        for db_name in dbs_to_check:
+            if db_name not in dbs:
+                print(f"\nError: Database '{db_name}' not found", file=sys.stderr)
+                continue
+
+            print(f"\n{'='*60}")
+            print(f"Database: {db_name}")
+            print(f"{'='*60}")
+
+            db_info = dbs[db_name]
+            print(f"Type: {db_info['type']}")
+            print(f"Path: {db_info['path']}")
+            size_gb = db_info.get("total_size_gb", 0)
+            print(f"Total Size: {size_gb:.2f} GB")
+
+            # Test search if requested
+            if args.test_search:
+                print(f"\nTesting BLAST search...")
+                test_query = "GTTCTTGTCGAAAAACGTCAACATTTTATAAAAAAGGGTTGCA"
+                print(f"Query: {test_query}")
+                print(f"Query length: {len(test_query)} bp")
+
+                start_time = time.time()
+                try:
+                    results = searcher.search_sequence(
+                        test_query,
+                        program="blastn",
+                        db=db_name,
+                        max_hits=5,
+                        evalue=1e-5,
+                        timeout=args.timeout,
+                        num_threads=args.num_threads,
+                    )
+                    elapsed = time.time() - start_time
+                    print(f"SUCCESS: Search completed in {elapsed:.2f} seconds")
+                    print(f"Found {len(results)} hits")
+                    if not results.empty:
+                        print(f"Top hit: {results.iloc[0]['sseqid']} ({results.iloc[0]['pident']}%)")
+                except Exception as e:
+                    elapsed = time.time() - start_time
+                    print(f"FAILED: Search failed after {elapsed:.2f} seconds")
+                    print(f"Error: {e}")
+
+        print(f"\n{'='*60}")
+        print("Diagnostic complete")
+        print(f"{'='*60}")
+
+        return 0
+
+    except Exception as e:
+        print(f"Error during diagnosis: {e}", file=sys.stderr)
+        return 1
+
+
 def _cmd_get_gff3(args: argparse.Namespace) -> int:
     """Retrieve GFF3 content for a phage."""
     from .gff3_retrieval import GFF3Retriever
@@ -178,6 +346,108 @@ def build_parser() -> argparse.ArgumentParser:
         help="List all phage IDs (optionally filter by source DB)",
     )
     get_gff3.set_defaults(func=_cmd_get_gff3)
+
+    blast_search = subparsers.add_parser(
+        "blast-search",
+        help="Search a sequence against BLAST databases",
+    )
+    blast_search.add_argument(
+        "sequence",
+        nargs="?",
+        default=None,
+        help="Query sequence (DNA or protein)",
+    )
+    blast_search.add_argument(
+        "--input", "-i",
+        default=None,
+        help="Path to query FASTA file",
+    )
+    blast_search.add_argument(
+        "--program", "-p",
+        default="blastn",
+        choices=["blastn", "blastp", "blastx", "tblastn", "tblastx"],
+        help="BLAST program (default: blastn)",
+    )
+    blast_search.add_argument(
+        "--db", "-d",
+        default=None,
+        choices=["phages", "proteins", "hosts"],
+        help="Database to search (auto-selected if not given)",
+    )
+    blast_search.add_argument(
+        "--max-hits", "-m",
+        type=int,
+        default=10,
+        help="Maximum number of hits (default: 10)",
+    )
+    blast_search.add_argument(
+        "--evalue", "-e",
+        type=float,
+        default=1e-5,
+        help="E-value threshold (default: 1e-5)",
+    )
+    blast_search.add_argument(
+        "--output", "-o",
+        default=None,
+        help="Output CSV file (prints to stdout if not given)",
+    )
+    blast_search.add_argument(
+        "--blast-db-dir",
+        default=None,
+        help="Path to BLAST database directory",
+    )
+    blast_search.add_argument(
+        "--list-databases",
+        action="store_true",
+        help="List available BLAST databases and their status",
+    )
+    blast_search.add_argument(
+        "--timeout", "-t",
+        type=int,
+        default=1800,
+        help="Timeout in seconds (default: 1800 = 30 minutes)",
+    )
+    blast_search.add_argument(
+        "--num-threads",
+        type=int,
+        default=1,
+        help="Number of threads for BLAST (default: 1)",
+    )
+    blast_search.set_defaults(func=_cmd_blast_search)
+
+    blast_diagnose = subparsers.add_parser(
+        "blast-diagnose",
+        help="Diagnose BLAST database health and test searches",
+    )
+    blast_diagnose.add_argument(
+        "--db", "-d",
+        default=None,
+        choices=["phages", "proteins", "hosts", "private", "combined"],
+        help="Specific database to diagnose (default: all)",
+    )
+    blast_diagnose.add_argument(
+        "--test-search",
+        action="store_true",
+        help="Test BLAST search with a sample query",
+    )
+    blast_diagnose.add_argument(
+        "--timeout", "-t",
+        type=int,
+        default=600,
+        help="Timeout for test search in seconds (default: 600 = 10 minutes)",
+    )
+    blast_diagnose.add_argument(
+        "--num-threads",
+        type=int,
+        default=1,
+        help="Number of threads for test search (default: 1)",
+    )
+    blast_diagnose.add_argument(
+        "--blast-db-dir",
+        default=None,
+        help="Path to BLAST database directory",
+    )
+    blast_diagnose.set_defaults(func=_cmd_blast_diagnose)
 
     return parser
 

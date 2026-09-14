@@ -10,7 +10,7 @@ Comprehensive guide for using the PBI-Scope database to build machine learning m
 import sys
 from pathlib import Path
 
-# Add PBI package to path
+# Add the `pbi` package to path
 sys.path.insert(0, str(Path.cwd().parent / 'src'))
 
 from pbi import quick_connect, NegativeExampleGenerator
@@ -64,7 +64,7 @@ print(f"Negatives: {(dataset['Label'] == 0).sum():,}")
 
 ### Database Schema
 
-The PBI database uses a star schema:
+The PBI-Scope database uses a star schema:
 
 **Fact Tables:**
 - `fact_phages` - Core phage metadata (Phage_ID, Length, GC_content, Host, Lifestyle)
@@ -761,7 +761,7 @@ ensemble.fit(X_train, y_train)
 ## Resources
 
 ### Documentation
-- [PBI API Reference](../api/overview.md)
+- [PBI-Scope API Reference](../api/overview.md)
 - [Database Schema](../database/overview.md)
 - [Example Notebooks](../../notebooks/)
 
@@ -779,6 +779,6 @@ ensemble.fit(X_train, y_train)
 
 ## Getting Help
 
-- Check the [ML/streaming notebook](https://github.com/ThibaultSchowing/PBI/blob/main/notebooks/03_ml_streaming.ipynb)
+- Check the [ML/streaming notebook](https://github.com/ThibaultSchowing/PBI-Scope/blob/main/notebooks/03_ml_streaming.ipynb)
 - Review [database documentation](../database/overview.md)
-- Open an issue on [GitHub](https://github.com/ThibaultSchowing/PBI/issues)
+- Open an issue on [GitHub](https://github.com/ThibaultSchowing/PBI-Scope/issues)

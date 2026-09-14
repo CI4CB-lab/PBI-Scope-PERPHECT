@@ -1,6 +1,6 @@
 # API Reference
 
-**Version: 0.4.0**
+**Version: 0.6.0**
 
 The PBI-Scope REST API provides a lightweight interface for querying the phage-host database without loading the full `pbi` package locally. It runs as a separate Docker service (`api`) and communicates with the same data volume as the analysis container.
 
@@ -38,6 +38,7 @@ client.close()
 | Filtered queries | ✅ Recommended | ✅ Works |
 | Single sequence retrieval | ✅ Works | ✅ Works |
 | GFF3 annotations | ✅ Works | ✅ Recommended |
+| BLAST similarity search | ✅ Works | ✅ Recommended |
 | Bulk downloads | ❌ Not supported | ✅ Recommended |
 | ML dataset preparation | ❌ Not supported | ✅ Recommended |
 | Host genome streaming | ❌ Not supported | ✅ Required |
@@ -84,6 +85,16 @@ client.close()
 | GET | `/phage/{id}/gff3` | Raw GFF3 annotations for a phage |
 | GET | `/gff3/stats` | GFF3 index statistics |
 | GET | `/gff3/sources` | List source databases in GFF3 index |
+
+### BLAST Search
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/blast/search` | Search a sequence against a BLAST database |
+| GET | `/blast/databases` | List BLAST databases and their build status |
+| GET | `/blast/status` | BLAST installation and database status |
+
+Available databases: `phages`, `proteins`, `hosts`, `private`, `combined`. Available programs: `blastn`, `blastp`, `blastx`, `tblastn`, `tblastx` (database auto-selected when omitted). Searches return tabular hits as JSON records.
 
 ### SQL Queries
 
@@ -159,6 +170,23 @@ genome = client.get_phage_genome("NC_001330.1", mode="concat")
 print(f"Genome length: {len(genome):,} bp")
 ```
 
+### BLAST search
+
+```python
+# Check which BLAST databases are built
+print(client.blast_status())
+print(client.list_blast_databases())
+
+# Search a DNA sequence against the phage database
+hits = client.blast_search(
+    sequence="ATGCGTTTACG...",
+    program="blastn",
+    db="phages",
+    max_hits=10,
+)
+print(hits.head())
+```
+
 ---
 
 ## Usage Examples
@@ -193,6 +221,15 @@ curl http://localhost:8000/phage/NC_001330.1/gff3
 # GFF3 stats
 curl http://localhost:8000/gff3/stats
 
+# BLAST databases and status
+curl http://localhost:8000/blast/databases
+curl http://localhost:8000/blast/status
+
+# BLAST search
+curl -X POST http://localhost:8000/blast/search \
+  -H "Content-Type: application/json" \
+  -d '{"sequence": "ATGCGTTTACG...", "program": "blastn", "db": "phages", "max_hits": 10}'
+
 # SQL query
 curl -X POST http://localhost:8000/query \
   -H "Content-Type: application/json" \
@@ -223,6 +260,11 @@ host_genome = client.get_host_genome("GCF_000005845", mode="concat")
 # GFF3 annotations
 gff3 = client.get_phage_gff3("NC_001330.1")
 print(gff3[:500])  # First 500 chars
+
+# BLAST search
+print(client.blast_status())
+hits = client.blast_search("ATGCGTTTACG...", program="blastn", db="phages")
+print(hits.head())
 
 # SQL query
 df = client.query("SELECT Source_DB, COUNT(*) as cnt FROM fact_phages GROUP BY Source_DB")
@@ -271,7 +313,7 @@ The simplest and safest approach. No changes to docker-compose.yml required.
 
 ```bash
 ssh user@your-server
-cd /path/to/PBI
+cd /path/to/PBI-Scope
 docker compose up -d api
 ```
 
@@ -313,8 +355,8 @@ The tunnel encrypts all traffic. Safe even without API authentication.
 The `APIClient` only needs `requests` and `pandas`. Install the package on your laptop:
 
 ```bash
-git clone https://github.com/ThibaultSchowing/PBI.git
-cd PBI
+git clone https://github.com/ThibaultSchowing/PBI-Scope.git
+cd PBI-Scope
 pip install -e .
 ```
 
@@ -423,3 +465,4 @@ See the [Caddy documentation](https://caddyserver.com/docs/) for TLS configurati
 - [Installation Guide](../guides/installation.md) — Docker setup
 - [PBI-Scope Python Package](../guides/pbi-package.md) — Full Python API
 - [Analysis Container Guide](../guides/analysis-guide.md) — Notebooks and IDE workflow
+- [BLAST notebook](https://github.com/ThibaultSchowing/PBI-Scope/blob/main/notebooks/09_blast_search.ipynb) — End-to-end similarity search walkthrough

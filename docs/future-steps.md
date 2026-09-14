@@ -167,4 +167,4 @@ We welcome contributions to any of these future development areas. If you're int
 3. Follow our contributing guidelines
 4. Submit a pull request with your changes
 
-For questions or suggestions about future development, please open an issue on our [GitHub repository](https://github.com/ThibaultSchowing/PBI/issues).
+For questions or suggestions about future development, please open an issue on our [GitHub repository](https://github.com/ThibaultSchowing/PBI-Scope/issues).

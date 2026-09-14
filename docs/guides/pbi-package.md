@@ -8,7 +8,7 @@ The `pbi` package is automatically available when using the Docker analysis cont
 
 ```bash
 # For local installation
-cd /path/to/PBI
+cd /path/to/PBI-Scope
 pip install -e .
 ```
 
@@ -62,6 +62,31 @@ dataset = neg_gen.generate_balanced_dataset(
     positive_ratio=0.5
 )
 ```
+
+### BlastSearcher
+
+For sequence similarity search against the pre-built BLAST databases (`phages`, `proteins`, `hosts`, `private`, `combined`). Databases are built by the pipeline (see [How It Works](how-it-works.md#pipeline-stages)) — searches fail if they have not been built yet.
+
+```python
+from pbi import BlastSearcher
+
+searcher = BlastSearcher()  # auto-detects the BLAST database directory
+
+# Check which databases are ready
+for name, info in searcher.list_databases().items():
+    print(name, "READY" if info["exists"] else "NOT BUILT")
+
+# Search a DNA sequence (program auto-selects the database if db is omitted)
+hits = searcher.search_sequence("ATGCGTTTACG...", program="blastn", db="phages")
+print(hits.head())
+```
+
+See notebook `09_blast_search.ipynb` for a full walkthrough, including protein searches (`blastp` against `proteins`), timeouts, and threading for large databases.
+
+### GFF3Retriever and APIClient
+
+- `GFF3Retriever` reads phage gene annotations from the indexed GFF3 files — see notebook `07_gff3_annotations.ipynb`.
+- `APIClient` exposes the same data (including BLAST via `blast_search()`, `list_blast_databases()`, and `blast_status()`) over HTTP — see the [API Reference](../api/overview.md).
 
 ## Retrieving Metadata
 

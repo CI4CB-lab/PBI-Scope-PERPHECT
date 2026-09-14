@@ -1,15 +1,15 @@
-# PBI Jupyter Notebooks
+# PBI-Scope Jupyter Notebooks
 
-This directory contains Jupyter notebooks for exploring and analyzing the PBI phage genomics database.
+This directory contains Jupyter notebooks for exploring and analyzing the PBI-Scope phage genomics database.
 
 ## Main Notebooks
 
-These notebooks form a progressive, user-oriented guide for working with PBI data.
+These notebooks form a progressive, user-oriented guide for working with PBI-Scope data.
 Run them in order for a complete introduction, or jump to the notebook that suits your goal.
 
 ### 📄 `00_pipeline_logs.ipynb` — Pipeline Logs Exploration
 Verify and understand pipeline execution and provenance:
-- Explains PBI's **three-layer versioning model** (package version · provider schema profile · run provenance)
+- Explains PBI-Scope's **three-layer versioning model** (package version · provider schema profile · run provenance)
 - Surfaces `pbi.__version__` and `pipeline_run_provenance.json` at startup
 - Lists the mounted `/pipeline-logs` directory and verifies expected artefacts
 - Safely previews selected log files when available
@@ -25,7 +25,7 @@ Comprehensive guide to understanding the database contents and data quality:
 - Understanding missing sequences (phages without hosts, hosts without genomes)
 
 ### 🔬 `02_sequence_retrieval.ipynb` — Sequence Retrieval with the PBI Package
-Complete guide to retrieving data using the PBI Python package:
+Complete guide to retrieving data using the `pbi` Python package:
 - Connecting to the database with `pbi.quick_connect()`
 - Querying phage and host metadata with filtering
 - LIMIT / OFFSET pagination
@@ -49,7 +49,7 @@ Standalone release-consumer notebook distributed alongside the Zenodo data relea
 - Clickable links to HTML data-merging and validation reports in `reports/`
 - Example cross-table SQL queries (marked as optional)
 
-### 🗺️ `05_end_to_end_walkthrough.ipynb` — End-to-End Walkthrough *(new)*
+### 🗺️ `05_end_to_end_walkthrough.ipynb` — End-to-End Walkthrough
 Guided, user-oriented journey through the full PBI data path in one notebook — ideal as a first read:
 1. Pipeline provenance check (did the pipeline run? which snapshot?)
 2. Database at a glance (counts, coverage)
@@ -59,21 +59,34 @@ Guided, user-oriented journey through the full PBI data path in one notebook —
 - Connects the dots between all other notebooks
 - Outputs saved under `<results>/05_end_to_end_walkthrough/`
 
-### 🔒 `06_reproducibility.ipynb` — Reproducibility & Provenance *(new)*
-Deep-dive into PBI's versioning conventions, build metadata, and reproducibility practices:
+### 🔒 `06_reproducibility.ipynb` — Reproducibility & Provenance
+Deep-dive into PBI-Scope's versioning conventions, build metadata, and reproducibility practices:
 - Explains and demonstrates the **three-layer versioning model** in detail
 - Reads `pbi.__version__`, `schema_profile` from config, and `pipeline_run_provenance.json`
 - Inspects the public data manifest (snapshot date, HTTP headers, checksums)
 - Queries the database `dataset_provenance` / `run_provenance` tables
 - Provides a practical **reproducibility checklist** and a ready-to-use citation line
 
-### 🧬 `07_gff3_annotations.ipynb` — GFF3 Gene Annotations *(new)*
+### 🧬 `07_gff3_annotations.ipynb` — GFF3 Gene Annotations
 Working with phage gene annotations stored in GFF3 format:
 - Initialize `GFF3Retriever` and explore the index
 - Retrieve raw GFF3 content for specific phages
 - Parse GFF3 into structured DataFrames (CDS features, products)
 - Memory-efficient line iteration for large files
 - Integration with phage metadata from DuckDB
+
+### 🌐 `08_api_client.ipynb` — API Client
+Querying the database through the REST API without loading the full `pbi` package locally:
+- Health checks and database statistics
+- Filtered phage/host metadata queries
+- Single sequence retrieval and SQL exploration
+- Remote access via SSH tunnel
+
+### 🔍 `09_blast_search.ipynb` — BLAST Search
+Sequence similarity search against the pre-built BLAST databases:
+- Check database build status with `BlastSearcher.list_databases()`
+- Nucleotide (`blastn`) and protein (`blastp`) searches
+- Custom timeouts and threading for large databases
 
 ## Subdirectories
 
@@ -116,7 +129,7 @@ Container paths:
 ### Local Development
 
 ```bash
-# Install the PBI package
+# Install the `pbi` package
 pip install -e .
 
 # Start Jupyter Lab from the project root
@@ -151,7 +164,7 @@ retriever.close()
 - Use DuckDB aggregations instead of loading everything into pandas
 
 ### Database Lock Error
-Always use read-only connections (the PBI package does this by default):
+Always use read-only connections (the `pbi` package does this by default):
 ```python
 conn = duckdb.connect(db_path, read_only=True)
 ```
@@ -192,4 +205,4 @@ In the repository this maps to `./outputs/`.
 - [Analysis Guide](../docs/guides/analysis-guide.md)
 - [Machine Learning Guide](../docs/guides/machine-learning.md)
 - [Docker Guide](../docs/guides/docker-guide.md)
-- [PBI Documentation](https://thibaultschowing.github.io/PBI/)
+- [PBI-Scope Documentation](https://thibaultschowing.github.io/PBI-Scope/)

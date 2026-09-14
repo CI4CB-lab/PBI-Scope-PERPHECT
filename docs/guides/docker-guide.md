@@ -6,8 +6,8 @@ PBI-Scope uses Docker Compose to orchestrate three services: `pipeline`, `analys
 
 ```bash
 # Clone and configure
-git clone https://github.com/ThibaultSchowing/PBI.git
-cd PBI
+git clone https://github.com/ThibaultSchowing/PBI-Scope.git
+cd PBI-Scope
 cp .env.example .env
 # Edit .env: set NCBI_EMAIL, UID, GID
 
