@@ -559,6 +559,10 @@ def main():
     from pbi.negative_examples import NegativeExampleGenerator
     from pbi_adapter import PBIAdapter
     from sklearn.model_selection import train_test_split, StratifiedKFold
+    # Function-level import: main() uses keras.callbacks in the standard-split
+    # branch. Must NOT move to module top level — train.py has to stay
+    # importable on machines without TensorFlow (unit tests).
+    import keras
 
     with _Timer("quick_connect (DB + FASTA init)"):
         retriever = quick_connect()

@@ -9,6 +9,7 @@ import sys
 import json
 import os
 import tempfile
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -16,6 +17,23 @@ import pandas as pd
 import pytest
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "PERPHECT"))
+
+
+@contextmanager
+def _mock_keras_module(mock_keras):
+    """Make `import keras` resolve to a mock without snapshotting sys.modules.
+
+    Do NOT use patch.dict(sys.modules, ...) here: on exit it clears the whole
+    dict and restores a snapshot, evicting modules imported during the block
+    (e.g. sklearn/scipy). Later tests then re-execute those imports and crash
+    with "cannot load module more than once per process" for C extensions.
+    This helper adds/removes only the single 'keras' key.
+    """
+    sys.modules["keras"] = mock_keras
+    try:
+        yield mock_keras
+    finally:
+        sys.modules.pop("keras", None)
 
 
 class TestArgParsing:
@@ -360,7 +378,10 @@ class TestTrainingPaths:
             patch("pbi_adapter.PBIAdapter") as MockAdapter,
             patch.object(train, "load_or_build_model", return_value=(mock_model, False)),
             patch.object(train, "detect_gpu", return_value=False),
-            patch.object(train, "keras", mock_keras, create=True),
+            # Simulate keras being importable (as in production) WITHOUT
+            # pre-injecting it into train's namespace — so a missing
+            # `import keras` in main() fails here just as it would live.
+            _mock_keras_module(mock_keras),
         ):
             adapter_instance = MagicMock()
             adapter_instance.get_pair_ids_only.return_value = pd.DataFrame({
@@ -493,7 +514,10 @@ class TestTrainingPaths:
             patch("pbi_adapter.PBIAdapter") as MockAdapter,
             patch.object(train, "load_or_build_model", return_value=(mock_model, True)),
             patch.object(train, "detect_gpu", return_value=False),
-            patch.object(train, "keras", mock_keras, create=True),
+            # Simulate keras being importable (as in production) WITHOUT
+            # pre-injecting it into train's namespace — so a missing
+            # `import keras` in main() fails here just as it would live.
+            _mock_keras_module(mock_keras),
         ):
             adapter_instance = MagicMock()
             adapter_instance.get_pair_ids_only.return_value = pd.DataFrame({
@@ -589,6 +613,8 @@ class TestTrainingPaths:
             patch("pbi.quick_connect", return_value=mock_retriever),
             patch("pbi_adapter.PBIAdapter") as MockAdapter,
             patch("train.detect_gpu", return_value=False),
+            # main() imports keras before reaching the exclude_ids check
+            _mock_keras_module(MagicMock()),
         ):
             adapter_instance = MagicMock()
             adapter_instance.get_pair_ids_only.return_value = pd.DataFrame({
