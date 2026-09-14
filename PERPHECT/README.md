@@ -1,10 +1,20 @@
 # PERPHECT — Phage-Host Interaction Predictor
 
-PERPHECT is a dual-CNN model that predicts phage-bacteria interactions from genomic sequences. It uses two parallel convolutional encoders — one for the bacterial genome (up to 7M bp) and one for the phage genome (up to 200K bp) — whose features are concatenated and fed to a classification head.
+PERPHECT predicts which bacteriophages infect which bacteria, straight from genomic sequences. Under the hood it's a dual-CNN model: two parallel convolutional encoders — one for the bacterial genome (up to 7M bp) and one for the phage genome (up to 200K bp) — whose features are concatenated and fed to a classification head.
 
-This directory contains the complete training pipeline, integrated with PBI-Scope as the data backend.
+This directory contains the complete training pipeline, with PBI-Scope as the data backend. If you're new here, the whole journey looks like this:
+
+```
+0. Build the data  →  1. Hold out a test set  →  2. Train  →  3. Evaluate
+   (PBI-Scope            (notebook 01)             (train.py)     (notebook 02)
+    pipeline)
+```
+
+The [Quick Start](#quick-start) below walks through each step in order. The rest of this README explains how the pieces fit together.
 
 ## How It Works
+
+If you just want to train a model, you can stop at the Quick Start. This section is for when you want to understand — or debug — what's happening under the hood.
 
 ### Training Pipeline Overview
 
@@ -69,14 +79,32 @@ Default split: 70% train / 15% validation / 15% test.
 
 ## Quick Start
 
+Four steps, in order. Steps 0–1 are one-time setup; you'll repeat steps 2–3 as you experiment.
+
 ### Prerequisites
 
-1. PBI-Scope pipeline must have been run to build the database and sequence files
-2. Docker with NVIDIA Container Toolkit (for GPU training)
+1. Docker with NVIDIA Container Toolkit (for GPU training)
+2. A `.env` file in the repo root with your user IDs (so output files belong to you, not root) and your NCBI email (required for genome downloads):
+   ```bash
+   echo "UID=$(id -u)" >> .env
+   echo "GID=$(id -g)" >> .env
+   # then set NCBI_EMAIL=you@example.com in .env
+   ```
 
-### 1. Prepare Test Set
+### 0. Build the data (PBI-Scope pipeline)
 
-Run once to create a held-out test set that is never used during training:
+Training reads from a DuckDB database plus FASTA sequence files. If you don't have those yet, the PBI-Scope pipeline builds them for you — downloading public phage data, ingesting your private data (optional: drop one folder per source into `./private_data/`, or leave it empty), downloading host genomes from NCBI, and building the database, indexes, and BLAST files:
+
+```bash
+docker compose build pipeline
+docker compose run --rm pipeline
+```
+
+> ⏳ **First run takes many hours** (often 10+: ~50 GB of phage data plus thousands of host genomes). That's normal — it's downloading and processing genomes, not stuck. Later runs reuse cached data and are much faster. Logs and HTML reports land in `./pipeline_logs/`.
+
+### 1. Prepare test set
+
+Run once to carve out a held-out test set that training will never see (this is what keeps your evaluation honest):
 
 ```bash
 docker compose up -d analysis
@@ -107,31 +135,42 @@ docker compose run --rm analysis \
   python /workspace/PERPHECT/train.py --config /workspace/PERPHECT/config.yaml \
     --profile pretrain --gpu-device 3
 
-# Fine-tuning (requires pre-trained model from stage 1)
+# Fine-tuning on private data only (requires a pre-trained model, e.g. best fold)
 docker compose run --rm analysis \
   python /workspace/PERPHECT/train.py --config /workspace/PERPHECT/config.yaml \
     --profile finetune \
-    --pretrained-model /workspace/PERPHECT/outputs/run_*/fold_1/model_best.keras \
-    --freeze-base --gpu-device 3
+    --pretrained-model /results/run_*/fold_1/model_best.keras \
+    --gpu-device 3
+
+# Fine-tuning on ALL data (single final model from the best fold)
+docker compose run --rm analysis \
+  python /workspace/PERPHECT/train.py --config /workspace/PERPHECT/config.yaml \
+    --profile finetune_all \
+    --pretrained-model /results/run_*/fold_1/model_best.keras \
+    --finetuned-model-name model_best.keras \
+    --gpu-device 3
 ```
+
+> 💡 Expect startup to take a while (tens of minutes at `--limit 100000`): training fetches and encodes every sequence before epoch 1. Pass `--disk-cache-dir /workspace/.seq_cache` to reuse encodings across runs.
 
 ### 3. Evaluate
 
-Open `02_evaluate_model.ipynb` to load a trained model against the held-out test set.
+Open `02_evaluate_model.ipynb` (same Jupyter server as step 1). It auto-discovers your runs, loads the best model, and scores it against the held-out test set — no extra setup.
 
 ## Two-Stage Workflow
 
-For best results with private data:
+When you have private data, don't train on everything at once — you'll get better results in two stages: first learn general phage-host patterns from public data, then adapt to your private data.
 
 | Stage | Profile | Data Used | Output |
 |---|---|---|---|
-| Pre-train | `--profile pretrain` | All PBI-Scope **except** private source | `model_best.keras` |
-| Fine-tune | `--profile finetune` | **Only** private source | `model_finetuned_best.keras` |
+| Pre-train | `--profile pretrain` | All PBI-Scope **except** private source (5-fold CV) | `fold_X/model_best.keras` |
+| Fine-tune (private only) | `--profile finetune` | **Only** private source | `model_finetuned_best.keras` |
+| Fine-tune (all data) | `--profile finetune_all` | **Everything** (one final single model) | `model_finetuned_best.keras` |
 
 Key rules:
-- `--exclude-ids` (the held-out test set) is excluded in **both** stages
-- Fine-tuning uses `--freeze-base` to freeze CNN encoders, training only the classification head
+- `--exclude-ids` (the held-out test set) is excluded in **all** stages — that's what keeps evaluation honest
 - Fine-tuning uses lower LR (0.0001), fewer epochs (5), smaller batch (16)
+- By default **everything stays trainable** during fine-tuning. Pass `--freeze-base` explicitly to freeze the CNN encoders and train only the classification head (optionally with `--freeze-up-to <layer>`). Note: the `freeze_base: true` line in the config profiles has no effect on its own — only the CLI flag activates freezing.
 
 ## Model Architecture
 
@@ -204,9 +243,22 @@ profiles:
       freeze_base: true
       freeze_up_to: "concatenated_features"
       finetuned_model_name: "model_finetuned_best.keras"
+
+  finetune_all:   # same as finetune, but trains on every source
+    training:
+      epochs: 5
+      batch_size: 16
+      patience: 3
+      fine_tune_lr: 0.0001
+      fine_tune_epochs: 5
+      freeze_base: true
+      freeze_up_to: "concatenated_features"
+      finetuned_model_name: "model_finetuned_best.keras"
 ```
 
-Parameters like `exclude_ids` and `exclude_sources` are config-only — not CLI flags.
+`exclude_ids` and `exclude_sources` live in the config file, but both can also be overridden from the CLI (`--exclude-ids`, `--exclude-sources`) — CLI wins.
+
+> The profiles above also carry `data` filters (omitted here for brevity — see `config.yaml`). That's the whole difference between the two fine-tune profiles: `finetune` sets `exclude_sources: [PERPHECT_private]` (train on private only), while `finetune_all` sets no source filter (train on everything). Both keep `exclude_ids`, so the held-out test set stays out.
 
 ### Command-Line Arguments
 
@@ -217,8 +269,11 @@ Parameters like `exclude_ids` and `exclude_sources` are config-only — not CLI 
 | `--steps-per-epoch` | None | Batches per epoch (None = full dataset) |
 | `--patience` | 5 | Early stopping patience |
 | `--learning-rate` | 0.0004 | Initial learning rate |
-| `--limit` | None | Limit positive pairs (None = all) |
+| `--limit` | None | Limit positive pairs (None = all). Private negatives are always fully included |
+| `--exclude-ids` | None | CSV of Phage_ID,Host_ID pairs to hold out (usually `test_data/excluded_pairs.csv`) |
+| `--exclude-sources` | None | Sources to leave out (pre-train) — or the *only* sources to train on (fine-tune) |
 | `--negative-ratio` | 1.0 | Max synthetic negatives × private negatives |
+| `--disk-cache-dir` | None | Reuse one-hot encodings across runs (e.g. `/workspace/.seq_cache`) — big speedup on repeat runs |
 | `--focal-alpha` | 0.25 | Focal loss positive-class weight |
 | `--focal-gamma` | 2.0 | Focal loss focusing parameter |
 | `--bacterium-threshold` | 7000000 | Max bacteria length |
@@ -228,7 +283,7 @@ Parameters like `exclude_ids` and `exclude_sources` are config-only — not CLI 
 | `--output-dir` | /results | Output directory (Docker: mapped to `./outputs`) |
 | `--run-name` | timestamp | Run name |
 | `--config` | None | YAML config file |
-| `--profile` | None | Profile name (`pretrain`, `finetune`) |
+| `--profile` | None | Profile name (`pretrain`, `finetune`, `finetune_all`) |
 | `--cross-validate` | 0 | K folds for CV (0 = standard split) |
 | `--pretrained-model` | None | Path to pre-trained `.keras` model |
 | `--freeze-base` | False | Freeze CNN encoders |
@@ -238,6 +293,8 @@ Parameters like `exclude_ids` and `exclude_sources` are config-only — not CLI 
 | `--finetuned-model-name` | model_finetuned_best.keras | Fine-tuned model output name |
 | `--no-gpu` | False | Force CPU |
 | `--gpu-device` | 0 | GPU device index |
+| `--log-file` | None | Also write logs to a file |
+| `--verbose` / `-v` | False | Debug-level logging |
 
 ## Loss Function & Metrics
 
@@ -314,7 +371,7 @@ python train.py --config config.yaml --cross-validate 5 --epochs 10
 
 - Each fold gets its own `fold_X/` directory with model, logs, and pair CSVs
 - Uses 80/20 train/val split within each fold
-- After all folds: `cv_summary.json` with mean ± std for val_loss, val_accuracy, and epochs
+- After all folds: `cv_summary.json` with mean ± std for val AUC, val loss, test MCC, plus mean epochs
 - **Not compatible** with `--pretrained-model` (fine-tuning)
 
 ## Evaluation Notebook
@@ -409,3 +466,5 @@ python train.py --config config.yaml \
 **Out of memory:** Reduce `--batch-size` (try 32 or 16), reduce thresholds, or use `--limit` on a subset.
 
 **Slow training:** Check `nvidia-smi` on host. Verify GPU detected in logs (`GPU detected: 1 device(s)`) and that XLA JIT and cuDNN autotuning are enabled. The host cache (~5.6GB) ensures each unique host is encoded once. Consider using `--limit` and `--steps-per-epoch` to reduce per-epoch time.
+
+**Slow startup (long wait before epoch 1):** That's expected — training fetches and one-hot-encodes every sequence before the first epoch (tens of minutes at `--limit 100000`). Watch the `[Timer]` lines in the log to see which phase you're in. To speed up repeat runs, pass `--disk-cache-dir` so encodings are reused instead of recomputed.
