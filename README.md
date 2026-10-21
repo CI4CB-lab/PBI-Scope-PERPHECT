@@ -1,4 +1,9 @@
 # PBI-Scope
+
+## Neural Network Training Usecase
+
+He we use PBI-Scope toolkit and its ability to retrieve a very large collection of linked phage-bacteria sequences to train an existing Neural Network (PERPHECT classifier). Natively based on PyTorch, here we also demonstrate that PBI-Scope can be used with TensorFlow based architectures by using a wrapper class. 
+
 ## Dockerized Phage Bacteria Interactions toolkit based on PhageScope
 
 > A proof-of-concept dockerized bioinformatics pipeline that makes phage genomic data from [PhageScope](https://phagescope.deepomics.org/database) and their hosts available in an efficient, structured format for training neural networks and AI models for phage-host interaction prediction.
